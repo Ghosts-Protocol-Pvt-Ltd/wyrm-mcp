@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  wyrm:
+    image: ghcr.io/ghosts-lk/wyrm-mcp:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - wyrm-data:/data
+    environment:
+      - WYRM_DB_PATH=/data/wyrm.db
+    restart: unless-stopped
+volumes:
+  wyrm-data:
