@@ -1,0 +1,26 @@
+Wyrm — Proprietary Software License
+Copyright © 2026 Ghost Protocol (Pvt) Ltd. All rights reserved.
+
+This software ("Wyrm") and its source code, documentation, and associated
+materials are the proprietary and confidential property of Ghost Protocol
+(Pvt) Ltd, Colombo, Sri Lanka.
+
+NO OPEN-SOURCE LICENSE IS GRANTED. Except as expressly permitted in a written
+agreement signed by Ghost Protocol (Pvt) Ltd, or by the Wyrm Terms of Service
+for use of the official distribution and hosted services, you may NOT:
+  - copy, modify, or create derivative works of this software;
+  - distribute, sublicense, sell, rent, or publish this software;
+  - reverse-engineer, decompile, or disassemble any part of it, except to the
+    extent this restriction cannot be excluded by applicable law;
+  - remove or alter any proprietary or attribution notices.
+
+Use of the official Wyrm builds and the Wyrm hosted services is governed by the
+Wyrm Terms of Service and requires a Ghost Protocol account.
+
+HISTORICAL NOTE: versions of Wyrm published on or before 2026-06-14 (the npm
+package "wyrm-mcp" at version 7.2.1 and earlier) were released under
+AGPL-3.0-or-later; that license continues to apply to those specific versions.
+ALL SUBSEQUENT VERSIONS ARE PROPRIETARY AND ARE NOT OPEN SOURCE.
+
+Commercial and licensing inquiries: ryan@ghosts.lk
+Ghost Protocol (Pvt) Ltd · Colombo, Sri Lanka · ghosts.lk
