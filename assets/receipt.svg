@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="332" viewBox="0 0 760 332" role="img" aria-label="Wyrm measured receipt">
+  <rect width="760" height="332" fill="#050505"/>
+  <rect x="20" y="16" width="720" height="300" rx="2" fill="#0a0b0d" stroke="#1e2024" stroke-width="1"/>
+
+  <!-- header -->
+  <text x="44" y="52" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" letter-spacing="3" fill="#6b7078">RECEIPTS // MEASURED</text>
+  <text x="716" y="52" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" letter-spacing="2" fill="#34d399" text-anchor="end">v7.5.x</text>
+  <line x1="20" y1="68" x2="740" y2="68" stroke="#1e2024" stroke-width="1"/>
+
+  <!-- rows -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">
+    <text x="44" y="98"  letter-spacing="1.5" fill="#6b7078">NEGATIVE-LEARNING FIREWALL</text>
+    <text x="716" y="98"  fill="#dfe2e6" text-anchor="end">100% recall · 100% precision</text>
+    <line x1="20" y1="114" x2="740" y2="114" stroke="#131519" stroke-width="1"/>
+
+    <text x="44" y="144" letter-spacing="1.5" fill="#6b7078">RERANKED RECALL@1</text>
+    <text x="716" y="144" fill="#dfe2e6" text-anchor="end">33% <tspan fill="#34d399">&#8594; 52%</tspan> with NVIDIA NIM</text>
+    <line x1="20" y1="160" x2="740" y2="160" stroke="#131519" stroke-width="1"/>
+
+    <text x="44" y="190" letter-spacing="1.5" fill="#6b7078">TYPED SURFACE</text>
+    <text x="716" y="190" fill="#dfe2e6" text-anchor="end">32 verbs · 150+ tools callable</text>
+    <line x1="20" y1="206" x2="740" y2="206" stroke="#131519" stroke-width="1"/>
+
+    <text x="44" y="236" letter-spacing="1.5" fill="#6b7078">TEST SUITE</text>
+    <text x="716" y="236" fill="#dfe2e6" text-anchor="end">1,954 green</text>
+    <line x1="20" y1="252" x2="740" y2="252" stroke="#131519" stroke-width="1"/>
+
+    <text x="44" y="282" letter-spacing="1.5" fill="#6b7078">RUNS</text>
+    <text x="716" y="282" fill="#dfe2e6" text-anchor="end">local-first · no cloud LLM</text>
+  </g>
+
+  <text x="44" y="308" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10.5" fill="#4a4f57">Every figure is from a committed benchmark, reproducible from the repo. Never asserted.</text>
+</svg>

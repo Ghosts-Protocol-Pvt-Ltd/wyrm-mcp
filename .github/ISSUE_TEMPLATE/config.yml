@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question / share how it is going
+    url: https://github.com/Ghosts-Protocol-Pvt-Ltd/wyrm-mcp/discussions
+    about: Questions, ideas, and "how do I..." are best in Discussions. You can also run `wyrm feedback --question`.
+  - name: Email the maintainer
+    url: mailto:ryan@ghosts.lk
+    about: Prefer email? Reach Ryan directly.

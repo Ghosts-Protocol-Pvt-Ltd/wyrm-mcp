@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in Wyrm is not working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The fastest way to file this with the right
+        details prefilled is `wyrm feedback --bug` from your terminal.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you see? Include the exact error text if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smaller the repro, the faster the fix.
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: "Run `wyrm --version` and note your OS. `wyrm feedback --bug` fills this in for you."
+      placeholder: |
+        - wyrm-mcp: 7.5.x
+        - node: v22.x
+        - platform: linux x64
+        - client: Claude Code / Cursor / Copilot / ...
+    validations:
+      required: true

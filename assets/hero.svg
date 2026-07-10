@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-label="Wyrm — persistent memory for AI agents">
+  <defs>
+    <linearGradient id="silver" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f4f5f7"/>
+      <stop offset="0.55" stop-color="#c9ccd1"/>
+      <stop offset="1" stop-color="#8b9099"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="0.5" cy="0.42" r="0.75">
+      <stop offset="0" stop-color="#0c0d10"/>
+      <stop offset="1" stop-color="#050505"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#14161a" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="360" fill="#050505"/>
+  <rect width="1280" height="360" fill="url(#vignette)"/>
+  <rect width="1280" height="360" fill="url(#grid)" opacity="0.5"/>
+  <rect x="0.5" y="0.5" width="1279" height="359" fill="none" stroke="#1e2024" stroke-width="1"/>
+
+  <!-- top rule -->
+  <text x="72" y="70" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" letter-spacing="4" fill="#6b7078">WYRM // PERSISTENT MEMORY</text>
+  <circle cx="1180" cy="65" r="4" fill="#34d399"/>
+  <text x="1196" y="70" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" letter-spacing="3" fill="#6b7078" text-anchor="end" transform="translate(-4,0)"></text>
+  <text x="1208" y="70" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" letter-spacing="3" fill="#8b9099" text-anchor="end">LOCAL-FIRST</text>
+
+  <!-- wordmark -->
+  <text x="70" y="210" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="150" font-weight="800" letter-spacing="-4" fill="url(#silver)">WYRM</text>
+
+  <!-- tagline -->
+  <text x="76" y="262" font-family="ui-sans-serif, system-ui, sans-serif" font-size="26" font-weight="600" fill="#c9ccd1">Memory that survives the session.</text>
+  <text x="76" y="298" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" letter-spacing="0.5" fill="#6b7078">Local-first persistent memory for AI agents, over MCP. No cloud or LLM required.</text>
+
+  <!-- bottom rule -->
+  <line x1="72" y1="322" x2="1208" y2="322" stroke="#1e2024" stroke-width="1"/>
+  <text x="72" y="344" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" letter-spacing="2" fill="#4a4f57">npm install -g wyrm-mcp</text>
+  <text x="1208" y="344" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" letter-spacing="3" fill="#4a4f57" text-anchor="end">GHOST PROTOCOL</text>
+</svg>
