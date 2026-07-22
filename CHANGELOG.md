@@ -2,6 +2,400 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [8.5.4] - 2026-07-23 - Prime resolves by cwd, not machine-wide latest-active
+
+A bare `wyrm_session_prime` (no `project_id`/`project_name`) resolved its
+project as "whichever project wrote the newest session row, machine-wide" —
+so a session on ANY other project silently hijacked every subsequent bare
+prime on the box. Live repro: after a session on another
+project, a bare prime from the current project's directory returned the
+other project's near-empty brief — reading as "Wyrm didn't prime".
+
+- `resolvePrimeProject` now walks the server's cwd first via
+  `resolveProjectForPath` (the same resolver wyrm-guard and `failure_record`
+  already trust) — the MCP server is spawned in the session's project dir, so
+  the walk lands on the right project. The latest-active fallback survives
+  only for unenrolled directories.
+- Explicit `project_id` / `project_name` are unchanged and still win.
+- Covers both the default and fleet prime paths (shared helper).
+- New regression suite `tests/prime-cwd-project.test.ts` (hijack case,
+  fallback preservation, explicit-name precedence).
+
+## [8.5.3] - 2026-07-20 - Cloud: quarantine-and-skip undecryptable deltas (one bad push can't wedge the fleet)
+
+Sovereign pull used to stop FOREVER on a delta it could not decrypt or apply
+(`break pullLoop`, a sticky stop that never advanced the cursor). A single
+permanently-undecryptable delta — a peer that pushed rows encrypted with the
+wrong master key — therefore halted that device's pull, and with it the whole
+fleet's shared memory, indefinitely (one device stalled 25+ ticks on a single
+`skill:433` after a mis-keyed push).
+
+- A failing delta now gets 2 sticky retries (enough to ride out a transient row
+  ordering or partial-write blip), then is set aside in the cursor's quarantine
+  map and SKIPPED so the cursor advances past it. A later correct re-push arrives
+  as a new delta id and applies normally; the poison delta stays quarantined for
+  visibility and is surfaced in the sync summary and daemon tick log
+  (`Quarantined: N`).
+- One mis-keyed push can no longer wedge the fleet's sovereign sync.
+
+## [8.5.2] - 2026-07-20 - Cloud: loud key-mismatch at login, validity-gated re-login, daemon interval carry
+
+Three fixes from a fleet field report (a second machine joining an org account),
+all in the sovereign cloud CLI:
+
+- **Login fails loud on a key it cannot read.** `wyrm cloud login` used to report
+  full success even when the local master key could not decrypt the account's
+  existing deltas (joining an org whose data was encrypted with a different key).
+  Every surface said "connected" while sync moved 0 rows in both directions, the
+  only evidence buried in a later daemon tick. Login now pulls one existing delta
+  and test-decrypts it; on failure it says plainly that this device cannot read
+  the account yet and names the fix (`wyrm cloud recovery restore`).
+- **Re-login gates on session validity, not file existence.** An expired or
+  revoked session made `login` refuse with "already logged in" while `status` on
+  the same session reported "expired", so it could neither be used nor replaced.
+  Login now probes the session; only a still-valid one blocks, a definite 401
+  clears the stale file and proceeds, and an ambiguous (network) error preserves
+  the original guard.
+- **Daemon restart carries its interval.** `wyrm cloud daemon restart` reverted
+  to the 10-minute default instead of the interval it was running at. The manager
+  now persists `interval_ms`; restart carries it (an explicit `--interval` still
+  wins), and `status`/`restart` print the interval.
+
+## [8.5.1] - 2026-07-19 - White-label the dashboard; keep operator identity out of the package
+
+Wyrm ships to other people, so the dashboard must carry NO operator-specific
+identity out of the box. 8.5.0 baked one operator's branding into the shipped
+code; 8.5.1 makes the package neutral by construction.
+
+- **Branding is white-label by default (`src/branding.ts`).** The shipped code
+  names no company, logo, or internal concept. Product wordmark, logo, and the
+  fleet view's labels/copy resolve ONLY from a private `~/.wyrm/brand.json` (or
+  env) at runtime — so a reseller who never configures gets a neutral board,
+  and an operator's identity can't land in the public tarball by omission. The
+  fleet tab is opt-in (`WYRM_UI_FLEET` on|off|auto; auto shows it only when a
+  fleet grove exists), and is generic "Fleet Channel" unless an operator names
+  it.
+- **Operator logo no longer in the package.** Dropped the bundled brand SVG
+  from the `files` whitelist; an operator supplies their own via
+  `brand.json.markUrl`. (8.5.0 and earlier shipped it.)
+- Removed the last operator-identifying strings from `dist` (verified by scan).
+
+> **Note:** 8.5.0 is superseded — it shipped operator-branded strings + logo.
+> Upgrade to 8.5.1.
+
+## [8.5.0] - 2026-07-19 - The War Room dashboard + brand type finally loads
+
+A live ops view for the fleet war room, and the fix that makes the whole
+dashboard wear its own typeface.
+
+- **War Room tab in the web dashboard (`/ui`).** A real-time board for the
+  `fleet-warroom` grove: the signature **loop pipeline** (findings → claimed →
+  fixed → verified) with flowing connectors, a **presence board** (which fleet
+  agents are alive, pid-liveness LED), the **effectiveness strip** (repeats
+  blocked, tokens saved, rows shared — straight off the 8.4.0 recorder), and a
+  type-coded **activity feed** (finding / request / receipt / verdict, with
+  agent attribution and relative time). New `GET /ui/warroom` endpoint,
+  failure-isolated per section; degrades to "grove not found" on a device
+  without the grove.
+- **Fix: the dashboard's brand fonts never loaded.** The response-header CSP
+  omitted the Google Fonts CDNs the dashboard `<head>` intends, so every view
+  silently fell back from Geist + JetBrains Mono to system sans. `style-src`
+  now allows `fonts.googleapis.com` and `font-src` allows `fonts.gstatic.com` —
+  the Stealth-Silver typography actually renders now.
+
+## [8.4.0] - 2026-07-19 - The flight recorder: effectiveness + quality over time
+
+`wyrm doctor` (8.3.0) answers "what's off right now"; nothing answered "is it
+getting better or worse". This adds the longitudinal ledger — a timestamped
+trend so a slow degradation (recall drifting as the corpus outgrows the index,
+vectors quietly off for days, a defect class recurring) is legible instead of
+something you only notice when you re-run a tool by hand.
+
+- **`metrics_snapshots` table (migration 37)** — one row per (kind, capture):
+  - **health** — corpus size, vector coverage, FTS drift, review-queue depth,
+    unresolved failures, the resolved provider, and doctor-parity check bits.
+  - **effectiveness** — did memory actually *help*? failure blocks (repeats
+    prevented), rehydrate/recall/capture call volumes, and estimated tokens
+    saved (recovered context + blocked retries).
+  - **retrieval** — recall@1 / recall@10 / MRR from the eval bench, tagged with
+    the release, so a version that drops recall is caught.
+- **`wyrm metrics <snapshot|trend|show>`** — `snapshot` writes health +
+  effectiveness (cheap, offline); `--full` adds retrieval (runs the bench).
+  `trend` prints the series with **regression/degradation flags** ("vectors OFF
+  for 4 consecutive snapshots", "review queue growing", "recall@10 REGRESSED
+  4.0pts between 8.3.0 and 8.4.0", "+2,400 tokens saved since last snapshot").
+- **Nightly recorder** — a systemd timer captures health + effectiveness at
+  23:50 under the server's vault-injected provider env (so `provider` is
+  accurate, and no NIM tokens are spent — health/effectiveness never embed).
+- Failure-isolated by construction: a missing table or busy DB degrades ONE
+  metric to null; the recorder never throws into its caller.
+
+## [8.3.1] - 2026-07-19 - Crucible pass on 8.3.0: the honesty surface, proven honest
+
+An 87-agent adversarial Crucible over 8.3.0 (every finding cross-examined by 3
+independent skeptics) caught a CRITICAL regression in the surfaces meant to END
+silent degradation, plus a chain of correctness/leak fixes. All re-verified.
+
+- **CRITICAL: resolver and factory could disagree on their default arm.**
+  `resolveEmbeddingState()` reported `none` for an unrecognized
+  `WYRM_VECTOR_PROVIDER` while `createProvider()` built `LocalHashProvider` — so
+  any typo/case/whitespace value (`NIM`, `nim `, `bogus`) made every status
+  surface say "vectors off" while the server silently indexed non-semantic
+  hash-384 vectors: the exact status≠reality class 8.3.0 exists to kill,
+  reintroduced through mismatched defaults. Fixed with a shared
+  `normalizeProviderKey()` (trim+lowercase) and a factory default of
+  `NoneProvider` (never a silent local-hash). Regression-tested.
+- **Recall receipt `ftsOnlyReason` now truthful.** `vector-init` built a store
+  even for `auto`, so recall mislabeled vectors-disabled as `empty_index` /
+  `embed_error`; the `indexStale` state was unreachable. Now `vector-init` gates
+  on the *resolved* provider, and recall consults the provider name +
+  `indexCoverage()` and adds a `stale_index` reason.
+- **Capabilities no longer conflates deprecation with degradation** — a working
+  (deprecated) ollama is reported advisory, not "recall FTS5-only".
+- Scheme-less `WYRM_NIM_BASE_URL` → `nim_bad_base_url` (was read as healthy
+  local); `OllamaProvider.embed` bounded by a timeout like the others; `local`
+  is an honest advisory (no dangling `Fix:`); the capabilities briefing header
+  is pure ASCII on the default wire.
+- **CLI:** a valueless `--note`/`--name` no longer crashes with a raw
+  better-sqlite3 TypeError; `index --help rebuild` prints usage instead of
+  running status.
+- **Session hooks:** a literal-`null` stdin payload no longer breaks the
+  "always exit 0" contract; compact-continuation / meta transcript lines no
+  longer become the session objective; an objective starting with `--` is
+  preserved; the recency query honors `WYRM_DB_PATH`.
+
+157 suites / 2107 tests green. Two adversarial false positives were correctly
+rejected by the skeptic panel. Confirmed defects captured to Wyrm negative memory.
+
+## [8.3.0] - 2026-07-18 - The honesty release: wyrm doctor, no silent degradation, NIM-only embeddings
+
+Driven by tallow's silent-degradation field report (2026-07-18): subsystems could
+degrade quietly while every status surface kept reporting healthy — "the call
+succeeds, does less than the caller believes, and returns something that looks
+like success." Writes got receipts in 7.9.0; this release gives reads and config
+the same treatment, and settles the embedding-provider question: NVIDIA NIM is
+the supported provider, Ollama is out of the auto chain.
+
+- **`wyrm doctor` — the health check that refuses to flatter.** Six checks
+  (resolved embed provider, vector index vs corpus, FTS integrity, failure
+  firewall, review queue, schema), each printing OK or DEGRADED with the exact
+  fix command; anything degraded exits non-zero. A subsystem that is off now
+  LOOKS off.
+- **Ollama leaves the auto chain.** The old `OllamaAutoProvider` silently
+  delegated to a no-op when Ollama was absent — the root of "semantic search
+  never ran on this machine". `auto` now resolves honestly to `none` and every
+  surface says so with the NIM fix line. Explicit `WYRM_VECTOR_PROVIDER=ollama`
+  still works but deprecation-warns and leaves in the next major.
+  (`auto` still never selects a remote provider: embedding memory text
+  off-machine stays an explicit egress decision, same posture as grove sync.)
+- **`resolveEmbeddingState()`** — one pure, env-derived source of truth
+  (`resolved` / `reason` / `fix` / `egressHost`) read by every honesty surface.
+- **`wyrm_capabilities` stops lying.** The runtime line previously hardcoded
+  "ollama embeddings" regardless of reality; it now reports the RESOLVED
+  provider and appends a degradation warning + fix whenever vectors are off.
+- **`wyrm_session_prime` vector-health advisory.** A fresh session is told,
+  in the brief itself, when recall is running at the FTS-only floor
+  (~59.9% vs 72.2% hybrid recall@10) or the index is empty — with the fix.
+- **Recall receipt: `ftsOnlyReason`** (the 2026-07-15 token-path audit,
+  defect 4). `embedModel: null` no longer conflates "vectors disabled",
+  "no key", "empty index", and "embed error" — the receipt says which.
+- **CLI: `wyrm failure <list|resolve>`.** `wyrm_failure_resolve` routes but is
+  not advertised on the v8 32-verb surface, so a fixed failure had no
+  discoverable off-switch. Now it does.
+- **CLI: `wyrm project <add|list>`.** Projects can be registered without a
+  session-start side effect.
+- **Fix: `wyrm index rebuild --help` actually ran the rebuild.** `--help` on
+  the `index` verb now prints usage, never executes.
+
+## [8.2.0] - 2026-07-17 - Sovereign auto-sync daemon + the sync that never settled
+
+Sync correctness. 8.1.0 surfaced the sovereign path; wiring up a hands-off daemon
+for it exposed a real bug in the delta engine that had been quietly making every
+sync slow.
+
+- **Sovereign auto-sync daemon.** `wyrm cloud daemon <start|stop|restart|status>`
+  (and the `wyrm_cloud_sync` `sovereign-daemon-start`/`-stop`/`-status` actions)
+  run the sovereign per-row E2E sync periodically, so cross-device memory is
+  hands-off rather than a manual `wyrm cloud sync`. It is a thin scheduler that
+  spawns the same `wyrm cloud sync` CLI per tick — process-isolated, so a tick
+  never leaks the sync engine's DB connection and a tick crash can't take the
+  scheduler down. Single-instance via its own PID file, distinct from the legacy
+  snapshot daemon.
+- **Fix: sovereign sync never settled (migration 36).** `collectChangedRows`
+  only applies its `updated_at > cursor` incremental filter to tables that HAVE
+  an `updated_at` column. `quests` and `design_references` didn't, so every sync
+  re-collected ALL their org/public rows, stamped each with `Date.now()`, and
+  re-pushed them — forever. With the push endpoint costing ~1s/row server-side,
+  a full quest table made every sync take minutes. Migration 36 adds `updated_at`
+  (backfilled) to both. **Measured: 106-rows-every-sync (minutes) → 0 rows /
+  1.5s steady state.**
+- **No triggers — app-code stamping.** Both tables are external-content FTS5,
+  where a self-`UPDATE` inside a trigger corrupts the FTS index when an indexed
+  column changes ("database disk image is malformed"). `updated_at` is stamped in
+  app code on every write (`addQuest`/`updateQuest`/`updateQuestFields`,
+  `design.ts`) — the convention the four already-correct synced tables use.
+- **No silent drops.** `collectChangedRows` now COLLECTS rows with a NULL
+  `updated_at` (ordered last) instead of filtering them out, so a row that ever
+  misses its stamp re-pushes loudly rather than vanishing from sync.
+- **Push chunk 50 → 25** so each request stays well under the client's 60s abort
+  even at 2x server latency (a 50-row chunk measured ~47s).
+
+Migrations at v36. 157 suites / 2,102 tests.
+
+## [8.1.0] - 2026-07-17 - Sovereign sync surfaced, entity graph, delete propagation
+
+Coherence. The post-v8 health pass named one real architectural incoherence (two overlapping
+cloud systems) and one memory gap (the knowledge graph existed but nothing populated it). Both
+are closed here, alongside the sovereign-sync GA correctness blocker.
+
+- **Sovereign cloud sync is now reachable from MCP (quest #972).** The `wyrm_cloud_sync` tool
+  drove only the weaker whole-DB snapshot daemon (System B: last-write-wins by mtime); the
+  sovereign zero-knowledge, per-row AES-256-GCM E2E delta sync (System A) was CLI-only, so an
+  agent asking for "cloud sync" got the weak path. `wyrm_cloud_sync` gains `sovereign`,
+  `sovereign-preview`, and `sovereign-status` actions that drive the sovereign path (process
+  isolated over the same `wyrm cloud …` CLI, no second WAL write-connection). Its description
+  now leads with the sovereign path; `wyrm_cloud_backup` and the snapshot daemon are re-labeled
+  as the legacy snapshot, fenced off from the sovereign claim. No new raw tool.
+- **Deletes propagate (migration 34).** The sovereign sync engine had a `recordTombstone` with
+  zero callers, so a delete on one device never reached another and could resurrect on pull.
+  AFTER DELETE triggers on the six synced tables now record tombstones, which `runSync` already
+  pushes as encrypted deltas.
+- **Private groves leak no deletion metadata (migration 35, quest #113).** Migration 34 recorded
+  a tombstone for *every* delete; a private grove (the default, incl. GHOST PROTOCOL) or a
+  within-visibility row would push content-free deletion metadata to the cloud. The triggers are
+  now grove-gated with a `WHEN` clause that mirrors the upsert egress gate exactly: a tombstone
+  records only when the row itself would have synced.
+- **Entity auto-extraction (the graph recall leg now fires).** Deterministic entity extraction
+  (proper-noun spans, code-shaped tokens, known tech, with UUID/hash/random-token rejection)
+  populates the `entities` + `relationships` graph on capture, plus a `wyrm entities
+  backfill|stats` CLI. The v8 graph recall leg was inert without it; on a populated project the
+  FTS entity lookup replaces the old arbitrary first-500 scan so it scales.
+- **Metabolize auto-safe lanes default-on.** Exact-hash duplicate supersede (canonical kept,
+  never deleted, sync-safe) and gentle bounded decay of stale auto-captures now run in
+  maintenance by default. Near-duplicate queuing stays opt-in (`WYRM_METABOLIZE=1`);
+  `WYRM_METABOLIZE=0` disables the auto-safe lanes.
+
+Migrations at v35. 156 suites / 2,096 tests.
+
+## [8.0.1] - 2026-07-17 - Injection quarantine hardening (the garak red-team)
+
+Security. The v8 premortem's one named residual (#965) — the full garak red-team against a
+live brief render — was run, and it found a real gap: the hand-authored injection detector
+caught only **3.4%** of the real 622-payload garak 0.15.1 corpus (latentinjection +
+promptinject + dan + in-the-wild jailbreaks). The DAN-family role-reassignment and persona
+jailbreaks evaded it entirely.
+
+- **Defense-in-depth quarantine.** The fix is architecture, not a bigger regex (a regex
+  provably can't enumerate every jailbreak): **`untrusted`-lane content is now CATEGORICALLY
+  withheld from context briefs** — its bytes never become agent-read context, whatever they
+  contain (0 escapes by construction against the full corpus). It stays fully searchable and
+  recallable, marked untrusted; only the assembled brief is guarded. `imported`-lane content
+  (git/pr/rules) remains detector-gated + ⚠-marked.
+- **Detector hardened** from 3.4% → **80.7%** on the real corpus with **0 false positives** on
+  benign engineering prose, now covering the real attack classes (instruction-override,
+  role/persona reassignment, DAN/jailbreak, coercion/termination threats, goal-hijack,
+  output-format hijack, credential/exfil, command-exec, fictional-character framing,
+  encoding-smuggling — morse/base64/unicode-override).
+- **`bench/injection-redteam.mjs` + `tests/injection-redteam.test.ts`**: the red-team is now a
+  committed, offline CI gate (curated structural corpus; point it at a fresh garak export for
+  the full 622-payload deep run). The gate's hard invariant is untrusted-lane escapes = 0.
+
+Migrations unchanged (v33). 153 suites / 2,077 tests.
+
+## [8.0.0] - 2026-07-17 - PROOF: memory you can prove
+
+The v8 "PROOF" major. Started from an operator report — "I feel like Wyrm has gaps, Claude
+forgets after a while" (2026-07-15) — and a premortem of eight ways v8 could fail. Shipped
+across 7.9.0–7.12.0 and cut here. The through-line: **every claim Wyrm makes is now provable
+— receipted, gated, or measured — and the one place it isn't is written down, not hidden.**
+
+- **Receipts (F1).** Every memory write returns and ledgers a structured receipt (stored /
+  queued / merged / aliased / dropped + why); `wyrm digest --writes` reconstructs any day
+  offline; a synthetic-day reconciliation gate fails CI on an unexplained drop.
+- **Bridge (F2).** `wyrm bridge <init|status|run [--watch]>` — remember / render / reverse
+  substrate lanes from one receipted config, adopting the legacy distill state; harness
+  files become compiled views of Wyrm. Re-import content-hash guards on every import verb.
+- **Metabolism (F3).** `wyrm metabolize` — exact-hash dupes auto-merge by supersede (never
+  delete, sync-safe), near-dups queue as review candidates, gentle bounded decay; truth-
+  shape lint; the brief-SLO gate (which caught a real brief-budget bug on first run).
+- **Numbers (F4).** Recency + temporal + usefulness + knowledge-graph recall legs (all
+  identity when absent, all env-tunable); three CI-gated benches; `docs/RETRIEVAL-NUMBERS.md`.
+- **Trust fabric (F5).** `source_trust` provenance lanes (operator > agent > imported >
+  untrusted), marked at every brief render; brief-surface injection quarantine; process-
+  identity-first presence everywhere; opt-in probationary write lanes for new fleet agents.
+- **Known residual risk (honest):** the full 559-payload garak red-team against a live brief
+  render (#965) is a crucible-harness job, not run here — a test-level corpus gates CI. Do
+  the full run before any public launch. See `specs/wyrm-v8/premortem-2026-07-15.md` §re-read.
+
+152 test suites / 2,071 tests. No breaking API/tool changes vs 7.x — the 8.0.0 bump marks the
+completed PROOF program, not a surface break; migrations climb to v33 (additive).
+
+## [7.12.0] - 2026-07-16 - v8 F4+F5: retrieval numbers + trust fabric
+
+- **Temporal recall** (v8-A4): an explicit time expression in the query — "yesterday", "today", "last week", "last N days", "N days ago", an ISO date — soft-filters recall toward the queried window (`WYRM_RECALL_TEMPORAL_WEIGHT`, default 0.5; a floor, never an exclusion, so a decisively better out-of-window match survives). No time expression = byte-identical ordering.
+- **The feedback loop is closed**: memory whose reuse `wyrm_feedback` confirmed useful earns a bounded boost (up to 1.15×, volume-damped, never punitive — `WYRM_RECALL_USEFULNESS_WEIGHT`).
+- **`docs/RETRIEVAL-NUMBERS.md`**: the citable two-tier LoCoMo table (real set: FTS floor r@10 59.9%, hybrid 72.6%, MRR 0.448), the freshness eval, the discovery gate — one reproducible page (draft, pending operator sign-off).
+- **Trust fabric** (v8-A5, migration 33): every artifact carries a `source_trust` lane (`operator > agent > imported > untrusted`), derived conservatively from the writer (nothing becomes operator by accident). Imported/untrusted provenance is MARKED at every brief render, and instruction-shaped content from a non-first-party lane is quarantined out of briefs entirely — the same text from the operator passes (a trust lane, not censorship).
+- **Presence is process-identity-first everywhere** (v8-A6): `liveAgents` and the reaper now key on pid+start-time — an idle pid-alive agent never reads dead, a pid-dead one is reaped before its TTL.
+- **Import lanes finished** (#939/#947): pr re-import guard (`pr:` signatures), rules imports truth-shape-linted and receipted, harvest drops accounted.
+- FEATHERWEIGHT re-baselined with attribution (S2 delta = ranking now selects different corpus items + capture receipts; the ≤8K ListTools pin holds).
+
+## [7.11.0] - 2026-07-16 - v8 F3: memory metabolism (consolidate, decay, lint, gate)
+
+- **`wyrm metabolize [--dry-run] [--project] [--no-near]`** (v8-A3): the digestion pass, receipted end-to-end. Exact-hash duplicates auto-merge by **supersede — never delete** (deletes don't tombstone through cloud sync; supersede propagates and recall already hides it). Near-duplicates (deterministic token-shingle Jaccard) queue as review merge-candidates, idempotent via `nd:` signatures — summarize-then-judge, never auto-applied. Gentle bounded decay for old, never-reused `[auto:*]`/bridge captures only (factor 0.9/run, floor 0.3; operator memory never decays). Maintenance lane behind `WYRM_METABOLIZE=1`.
+- **Truth-shape lint.** `wyrm_truth_set` queues config-assignment shapes (`no_xss = true`) for review instead of storing them as bare truths — the 2026-07-11 41-pseudo-truth dump is structurally closed (`WYRM_NO_TRUTH_LINT=1` bypass).
+- **Fix: the context-brief budget was spent kind-major** ('pattern' first), so a flood of `[auto:*]` digests could exhaust `wyrm_context_build`/prime's memory brief before a single distilled lesson got a slot — silently defeating the 2026-07-12 provenance downrank. The brief now selects its top-N in penalty-sorted global order BEFORE kind grouping. Found by the new brief-SLO CI gate on its first run.
+- **Brief-SLO gate**: a committed junk/signal fixture asserts the capped prime brief still carries the signal (≥5/6 truths, ≥3/6 lessons against a 4× junk flood).
+
+## [7.10.0] - 2026-07-16 - v8 F2: wyrm bridge (the substrate flow, orchestrated)
+
+- **`wyrm bridge <init|status|run>`** (v8-A2, one-substrate-many-renders): one configured, receipted runner for the substrate lanes. `remember` — daily operator notes → sectioned, hash-deduped, captured direct (operator trust lane; the legacy distill script's state is ADOPTED on first run so migration never re-captures). `render` — composes the guarded v7 F4 pipeline (human edits inside managed regions are harvested to review BEFORE overwrite). `reverse` — sweep-only ingest of native-file edits → provenance-tagged review candidates. Config `~/.wyrm/bridge.json`, state `~/.wyrm/bridge-state.json`, every action in the write ledger.
+- **`wyrm_import_git` re-import guard** (the 2026-07-08 duplicate-import scar, closed): each commit carries a `gi:` content-hash signature; importing the same history again is a no-op with per-commit drop receipts. Imports are also F1-receipted (queued under the imported trust lane unless auto-approved).
+- Scope notes: render write-event triggering and the pr/rules import lanes remain tracked-open (#945, #947/#939).
+
+## [7.9.0] - 2026-07-16 - v8 F1: write receipts (nothing silently lost)
+
+- **Write receipts (v8-A1).** Every memory write answers for itself: a structured receipt (`stored` / `queued` / `merged` / `aliased` / `dropped` + why) rides the response of `wyrm_remember`, `wyrm_capture` (including the conflict-queue path), `wyrm_auto_capture` (dedup drops accounted, not invisible), `wyrm_quest_add`, and `wyrm_truth_set` (supersede cascades noted) — and lands in the new local `write_ledger` (migration 32; never replicated, maintenance-pruned via `WYRM_WRITE_LEDGER_DAYS`, default 60d).
+- **`wyrm digest --writes [--since N] [--json]`.** The offline "what did Wyrm learn, queue, and refuse" report: outcomes by tool and source, non-stored reasons, review-queue depth. Deterministic, no network.
+- **`wyrm capture` CLI prints a trailing `receipt:` line** so hook callers (session capture, the .remember distill) can log what actually happened to their write.
+- **`wyrm_stats`** now shows the last 24h of write outcomes and the review-queue depth (queued memory is invisible to recall — a silent queue reads as lost memory).
+- **Synthetic-day reconciliation gate.** A scripted day of captures must reconcile to the ledger with zero unexplained non-stored rows — the write-side analogue of the golden-transcript corpus, enforced in CI.
+- **Freshness eval (v8-A4).** `bench/freshness.mjs` + CI gate: the recency prior's own number — fresh-wins@1 16/16 at the shipped default vs 1/16 disabled; decisively-better stale matches preserved 4/4; anti-softening check included.
+- **Fix: claim legibility.** A quest claim by an agent not on the presence board now says "announce first" instead of reporting a phantom "already claimed by another agent" (the FK failure was swallowed into the CAS-conflict path).
+- **Fix: heuristic-conflict advisory never fired** — its FTS query MATCHed a table alias (throws "no such column"), silently swallowed since introduction. Full-table-name MATCH restores the advisory.
+- **v8 "PROOF" spec-kit** committed under `specs/wyrm-v8/` (premortem, constitution v8-A1…A7, spec, plan, 34 tasks).
+
+## [7.8.0] - 2026-07-15 - Recall recency prior + the rehydrate write side
+
+- **Recall recency prior.** `recallHybrid` / `recallHybridGlobal` (the default `wyrm_recall` / `wyrm_search` artifact path) re-weight fused scores with a bounded time-decay multiplier `1 − w + w·2^(−age/halfLife)` — default weight 0.25, half-life 30 days. Fresh memory now out-ranks equally-relevant stale memory; the `(1 − w)` floor keeps a decisively better old match on top. Tune with `WYRM_RECALL_RECENCY_WEIGHT` (0 disables and restores the historic ordering exactly) and `WYRM_RECALL_RECENCY_HALFLIFE_DAYS`. Root cause it fixes: month-old lessons scored relevance 1.0 on queries about yesterday's work.
+- **`wyrm session log`.** New CLI verb — the WRITE side of `wyrm rehydrate`. Upserts a per-project session record keyed by `--run <harness session id>` (`--objectives/--completed/--issues/--commits/--notes`), so SessionEnd/PreCompact hooks keep the continuity brief fresh instead of replaying the last manually-recorded session forever. Exits 0 when the directory maps to no project (a memory hook must never break a session).
+- **Fix: snake_case direct-capture fields no longer silently dropped** (tallow field report, 2026-07-14). `wyrm_remember` / `wyrm_capture mode:'direct'` now accept `validated_fix` / `why_it_worked` as aliases of `validatedFix` / `whyItWorked` — the DB column, the outputSchema echo, and the mode-guard error all use the snake_case spelling, so following them used to save an empty-shell artifact while the write looked fine. `whyItWorked` (either spelling) now genuinely persists through `wyrm_capture` too.
+- **Fix: validation-error template glue.** `expected` no longer reads "Correct the 'mode' argument — it you passed …" — the "it" is only prepended to validate.ts-shaped details ("must be one of …"), not to hand-written details that carry their own subject.
+- **Docs: `wyrm events` now appears in `wyrm --help`** (it worked but was undiscoverable).
+- **`wyrm presence` CLI** (tallow ask, 2026-07-14): `announce` / `list` / `release` from the shell, so Claude Code hooks can finally reach the presence board. Liveness is process-identity-first — `--pid <n>` records `{pid, pid_start}` from `/proc` and the agent is alive iff that exact process still exists (a TTL is a clock: it marks idle-but-alive agents dead; the start time stops a recycled pid from impersonating a dead one). TTL remains the fallback for rows without a pid, and `list` shows every row with a per-row verdict instead of hiding expired ones.
+- **`wyrm_session_prime` review-queue advisory** (premortem follow-up): when captures sit at `needs_review=1` — which hybrid recall filters out — prime now says so ("N captured memories await review"), so queued memory is never mistaken for lost memory.
+
+## [7.7.0] - 2026-07-12 - NVIDIA integrations, the Firewall Receipt, sharper long sessions
+
+- **The Firewall Receipt.** `npm run bench:firewall` emits a reproducible, hash-stable attestation (`bench/firewall-receipt.json`) that the negative-memory firewall holds: 100% recall on repeated mistakes, 100% precision on novel actions, sub-millisecond, deterministic, no LLM, no cloud. Gated in CI (a regression fails the build), and a test recomputes the committed hash so tamper or drift fails the suite too.
+- **NeMo Agent Toolkit memory provider.** The new `nvidia-nat-wyrm` integration (`integrations/nvidia-nat-wyrm/`) registers Wyrm as a `_type: wyrm` memory backend for the NVIDIA NeMo Agent Toolkit, plus a `GET /d/search` BM25 endpoint on wyrm-http that backs it.
+- **Sharper context over long, compaction-heavy sessions.** `wyrm_context_build` and `wyrm_session_rehydrate` now downrank `[auto:*]` session-summary dumps so distilled, hand-captured decisions win the token budget. `WYRM_RANK_WEIGHTS` are normalized to sum 1 so a custom weighting can't silently mask the downrank.
+- **`wyrm skill list`.** New CLI command surfaces the bundled SKILL.md guides plus your registered skills (they used to be buried in `node_modules`).
+- **Fix: `wyrm_capture` no longer crashes** when the direct-capture fields (`kind`/`problem`/`validated_fix`) are passed without `mode:'direct'`. It now returns a clean, actionable error pointing at `mode:'direct'` instead of a server-side `Cannot read properties of undefined (reading 'trim')` and a silent write failure; `memory.add` guards a missing `problem` legibly.
+- **Fix: `wyrm_context_build`** returns a clean "task is required" error instead of an opaque crash on a missing or mis-named argument.
+
+## [7.6.0] - 2026-07-11 - Free tier works instantly, no account
+
+- **Install-and-it-works.** The free/local tier now runs with no account, no login, and no network — instantly on install. Previously the official build required a free account (`wyrm login`) before any tool would run; that account wall is gone.
+- **Activation is now an operator opt-in.** Set `WYRM_REQUIRE_ACTIVATION=1` to require every user to sign in (managed/team deployments). Off by default, including on the official published build.
+- **`wyrm login` stays optional** — it unlocks cloud and paid features, nothing more. Your memory was always local; now nothing gates getting started.
+- **Revenue protection unchanged.** Paid capabilities are enforced per-tool by `hasFeature()` as before; the former activation-gate tamper check moved into `hasFeature()`, so on the official build a stubbed license verifier denies *paid* features (never the free tier).
+
+## [7.5.3] - 2026-07-11 - License metadata
+
+- **Machine-readable proprietary declaration.** `package.json` now uses npm's `SEE LICENSE IN LICENSE` convention instead of `UNLICENSED`. The terms are unchanged (Wyrm remains proprietary); the old value told scanners "no rights granted to anyone," which is not accurate for official builds used under the Wyrm Terms of Service, and it zeroed the package's Socket.dev license score.
+- **Historical license note reworded.** LICENSE and NOTICE still record that wyrm-mcp 7.2.1 and earlier were open source, but no longer name the old license inline; supply-chain scanners were string-matching it and flagging current proprietary versions as copyleft. The old versions' packages carry their own license text, which continues to govern them.
+
 ## [7.5.2] - 2026-07-11 - Feedback
 
 - **New `wyrm feedback` command.** Opens a prefilled bug report, idea, or question with your version and platform filled in, so reports arrive usable. `--bug` and `--idea` go to Issues; `--question` goes to Discussions. Wyrm sends no telemetry, so this is the path when you want to reach the maintainer, and nothing is sent until you submit it yourself.
