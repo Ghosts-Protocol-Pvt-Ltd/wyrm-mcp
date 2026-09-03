@@ -2,7 +2,29 @@
 
 The native `better-sqlite3` module is the only piece that can fail at install time. This guide walks the three failure modes we've seen in the wild, in order from most-common to least.
 
-If your installation succeeded, you don't need this page.
+If your installation succeeded **and `wyrm` actually runs**, you don't need this page.
+
+---
+
+## 0. `Could not locate the bindings file` — npm v12+ silently skipped the native build
+
+**Symptom:** `npm install -g wyrm-mcp` reports success, but running `wyrm` (or any DB operation) crashes with `Error: Could not locate the bindings file ... better_sqlite3.node`.
+
+**Cause:** npm v12 changed the default to **deny dependency lifecycle scripts** (an allow-list security feature — `ignore-scripts` is still `false`). So `better-sqlite3`'s native addon never compiles, and `wyrm-mcp`'s own postinstall is skipped too. The install "succeeds" with an easy-to-miss `npm warn install-scripts` line.
+
+**Fix** — reinstall with the two packages' build scripts allow-listed:
+
+```bash
+npm install -g wyrm-mcp --allow-scripts=wyrm-mcp,better-sqlite3
+```
+
+Or make it the default for all your global installs:
+
+```bash
+npm config set allow-scripts=wyrm-mcp,better-sqlite3 --location=user
+```
+
+`wyrm update` passes `--allow-scripts` automatically, so once you're installed correctly, updates won't hit this.
 
 ---
 

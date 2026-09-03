@@ -5,8 +5,6 @@
 <p align="center">
   <img src="assets/hero.svg" alt="Wyrm — memory that survives the session" width="100%" />
 </p>
-
-<p align="center">
   <a href="https://www.npmjs.com/package/wyrm-mcp"><img src="https://img.shields.io/npm/v/wyrm-mcp?style=flat-square&labelColor=050505&color=c9ccd1&label=npm" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/wyrm-mcp"><img src="https://img.shields.io/npm/dm/wyrm-mcp?style=flat-square&labelColor=050505&color=c9ccd1&label=downloads" alt="npm downloads" /></a>
   <a href="#requirements"><img src="https://img.shields.io/node/v/wyrm-mcp?style=flat-square&labelColor=050505&color=c9ccd1" alt="node" /></a>
@@ -43,6 +41,8 @@ npm install -g wyrm-mcp   # install
 wyrm-setup                # wire it into your AI clients, then restart them
 ```
 
+> **On npm v12+**, npm denies dependency install scripts by default, which skips `better-sqlite3`'s native build — the install *succeeds* but `wyrm` then fails with *"Could not locate the bindings file"*. Install with the build allow-listed instead: `npm install -g wyrm-mcp --allow-scripts=wyrm-mcp,better-sqlite3` (`wyrm update` already does this for you). See [TROUBLESHOOTING.md](https://github.com/Ghosts-Protocol-Pvt-Ltd/wyrm-mcp/blob/HEAD/TROUBLESHOOTING.md).
+
 Then, from inside your client, ask it to call `wyrm_capabilities` to confirm the connection. The everyday loop is four steps the agent runs on its own once the habit sets in:
 
 ```
@@ -54,10 +54,6 @@ capture  →  store durable facts, lessons, and tasks as you go
 
 ## Measured, not asserted
 
-<p align="center">
-  <img src="assets/receipt.svg" alt="Wyrm measured receipt" width="720" />
-</p>
-
 Every number Wyrm publishes comes from a benchmark committed to the source, reproducible on your own data. The negative-learning firewall and the recall lift are the two that matter most, and both are covered below.
 
 ## Why Wyrm
@@ -68,24 +64,34 @@ Most memory tools store successes. Wyrm also records dead-ends and blocks the re
 
 ### Recall that finds things by meaning, not just keywords
 
-`wyrm_recall` runs keyword search (FTS5) and semantic search over a vector index, fuses them, and reranks. It is hybrid by default, no configuration required. For higher accuracy you can opt into NVIDIA NIM retrieval (below).
+`wyrm_recall` runs keyword search (FTS5) and semantic search over a vector index, fuses them, and reranks. It is hybrid by default, no configuration required, no account, and no hosted call: a small local embedding model downloads automatically the first time you run `wyrm-setup`. It also weighs recency, temporal cues, and confirmed reuse, so the memory that fits the moment ranks first. On a real-set LoCoMo benchmark committed in the repo, the deterministic no-LLM floor is recall@5 52.4% / recall@10 59.9%, and the bundled local model lifts that to recall@5 60.0% / recall@10 72.0% (in line with the published local-hybrid reference of 60.3% / 72.2%, see BENCHMARKS.md). For maximum accuracy, `wyrm upgrade` moves to hosted NVIDIA NIM retrieval (below).
 
 ### Local-first, and honest about egress
 
-By default nothing leaves your machine. The database is a single SQLite file at `~/.wyrm/wyrm.db`. When you do opt into a hosted embedding path, Wyrm reports exactly what left and where, in a determinism receipt and on its health endpoint. The privacy claim is one you can verify from the runtime, not just the docs.
+By default no memory data leaves your machine. The database is a single SQLite file at `~/.wyrm/wyrm.db`. The only default outbound calls are a daily npm version poll and, on installs with a license key, a signed revocation-list fetch — both off with `WYRM_NO_VERSION_CHECK=1` and `WYRM_LICENSE_REFRESH=0` respectively; the free tier's one-time model download is a plain fetch that sends nothing. `docs/EGRESS.md` in the repository enumerates every destination, and if you find an outbound call that is not on that table, that is a bug worth reporting. When you do opt into a hosted embedding path, Wyrm reports exactly what left and where, in a determinism receipt and on its health endpoint. The privacy claim is one you can verify from the runtime, not just the docs.
+
+### Every write leaves a receipt
+
+Every memory write returns a structured receipt that says what happened to it: stored, queued for review, merged, aliased, or dropped, and why. The receipts are ledgered too, so `wyrm digest --writes` reconstructs a day's writes offline and `wyrm_stats` shows the outcomes and the review-queue depth. You can audit what the agent actually committed to memory, not just trust that it did.
 
 ### Built for one agent or a fleet
 
 Every memory is attributed to the agent and run that produced it, so a swarm of agents can share one accountable memory bus, with failures kept private to your account by default. A live event stream keeps devices in sync.
 
+### Untrusted input stays out of the context brief
+
+Every artifact is tagged with where it came from: you, an agent, an import, or an untrusted source. Content on the untrusted lane is categorically withheld from the context briefs the model reads, whatever it contains, and imported content is detector-gated and marked. The brief-surface quarantine was hardened against a full garak red-team of 622 real jailbreak payloads: zero escapes from the untrusted lane by construction, and the detector flagged 80.7% of the rest with zero false positives on benign prose. That red-team runs as a CI gate.
+
 ## NVIDIA NIM retrieval (optional)
 
-Wyrm can use NVIDIA NIM for embeddings and reranking when accuracy is worth a hosted call. On a retrieval benchmark committed in the repo, recall@1 moved from 33% on the local baseline to 47% with NIM embeddings and 52% with NIM reranking added. It is an explicit opt-in, off by default, and the egress is disclosed on every call.
+Local vectors are on by default. NIM is the further step up, for embeddings and reranking, when accuracy is worth a hosted call. On a retrieval benchmark committed in the repo, recall@1 moved from 33% on the local baseline to 47% with NIM embeddings and 52% with NIM reranking added. It is an explicit opt-in, off by default, and the egress is disclosed on every call.
+
+The guided path is `wyrm upgrade`: a free API key, masked key entry, a live call to validate the key before anything is written, and an optional one-time reindex of existing memories on the new tier. To configure it by hand instead:
 
 ```bash
 export WYRM_VECTOR_PROVIDER=nim
 export WYRM_RERANK_PROVIDER=nim
-export NIM_API_KEY=nvapi-...
+export NVIDIA_API_KEY=nvapi-...
 ```
 
 <sub>Ghost Protocol (Pvt) Ltd is a member of NVIDIA Inception.</sub>
@@ -96,7 +102,17 @@ Claude (Code, desktop, web) · Cursor · GitHub Copilot · Windsurf · Codex, an
 
 ## Requirements
 
-Node.js 22 or newer. Optional: a local Ollama with `nomic-embed-text` for semantic recall without any hosted call.
+Node.js 22 or newer. Semantic recall is on by default via a small bundled local model (`wyrm-setup` downloads it, no account needed); `wyrm upgrade` adds hosted NVIDIA NIM retrieval for maximum accuracy. Already running Ollama for this? Existing setups keep working unchanged.
+
+## Pricing
+
+Wyrm is **free to use forever** — the local memory, the firewall, the recall, all of it. Paid plans add cloud sync across devices, encrypted snapshots, shared team memory, and support:
+
+- **Pro** — $29/mo · cloud sync, encrypted snapshots, analytics, priority support
+- **Team** — $199/mo · shared team memory, up to 25 seats, admin dashboard
+- **Enterprise** — $499/mo · unlimited seats, SSO/SAML, custom SLA, on-premise option
+
+Plans and self-serve checkout: **[account.ghosts.lk/pricing](https://ghosts.lk/pricing)**. Custom or on-premise, email [ryan@ghosts.lk](mailto:ryan@ghosts.lk).
 
 ## Community and feedback
 

@@ -14,15 +14,18 @@ Questions with no evidence turns (LoCoMo categories 3 & 5 — adversarial / worl
 
 ## Results — real LoCoMo (1,982 evidence QA, k=10)
 
-Verified on **wyrm-mcp 7.3.0**.
+First verified on **wyrm-mcp 7.3.0**; rows added since then self-document their own version and measurement date (see the bundled-tier row below, 8.7.0).
 
 | Tier | recall@1 | recall@5 | recall@10 | MRR@10 | Properties |
 |------|:--------:|:--------:|:---------:|:------:|------------|
 | **no-LLM FTS floor** | 29.5% | **52.4%** | **59.9%** | 0.393 | offline · zero-cloud · zero-LLM · CI-gated · reproducible anywhere |
 | vector-only (local) | 28.8% | 58.7% | 69.5% | 0.413 | local Ollama embeddings only |
 | **local hybrid** (FTS ⊕ vectors) | 32.8% | **60.3%** | **72.2%** | 0.447 | + local Ollama `nomic-embed-text` — still zero-cloud, advisory (varies by machine) |
+| bundled ONNX int8 (default install) | 32.5% | 60.0% | 72.0% | 0.443 | + bundled `nomic-embed-text-v1.5-int8` (no Ollama, no setup) — within 0.3/0.2 pts of the Ollama hybrid row above; zero-config default as of 8.7.0. Bundled runs in its own vector scope; cross-provider similarity vs Ollama measured mean 0.868 (informational; spaces isolated by model id). |
 
 The lift is monotonic and honest: **recall@10 climbs 59.9% → 69.5% → 72.2%** as you add local vectors on top of the lexical floor. The **FTS floor is the claim that matters**: it needs no model server, no API key, no network — clone the repo and you get the same numbers. The hybrid tier shows the lift from local dense vectors (the embedding model runs on *your* box; nothing leaves it). Wyrm's production `recall` uses a tuned convex score-blend (cand=50, α=0.7) that nudges hybrid recall@5 to ~62%; the table above reports the simpler RRF fusion the standalone harness ships, so the numbers match the reproduction command exactly.
+
+The bundled row swaps only the embedder (int8 ONNX in-process, no Ollama) into the exact same harness — same RRF fusion, same cand=25, same evidence-based scoring — measured with `npm run eval:bundled` (`bench/locomo-hybrid.mjs --provider bundled`) on 2026-08-14: recall lands within the ship gate (±1.5 pts of 60.3/72.2). It does this from its own vector scope, not a shared one: bundled ONNX (int8) and Ollama's GGUF conversion of nomic-embed-text are independently-built, each individually sane, but measured mean cosine 0.868 apart (`bench/parity-bundled.mjs` / `npm run bench:parity`, informational, not gated) — too far apart to mix under one model id without silently degrading recall, which is why the bundled provider is model-scoped as `nomic-embed-text-v1.5-int8` rather than sharing Ollama's `nomic-embed-text` id. Retrieval recall still lands on target because it depends on relative ranking within each backend's own space, not on the two backends occupying the identical vector space.
 
 ### no-LLM FTS floor — by category (evidence-bearing only)
 
