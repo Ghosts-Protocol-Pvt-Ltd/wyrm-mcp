@@ -2,14 +2,549 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [9.0.0] - 2026-09-03 - LATCH: make every claim true before the source goes public
+
+The release before the source opens. Scope was deliberately narrow — only work
+that is **irreversible on publish**, **armed by publication**, or a **public
+claim that is currently false**. Everything else is post-flip work done in the
+open, where it is cheaper.
+
+**Breaking for embedders.** `MemoryArtifacts.add()` no longer lets a caller
+activate an untrusted-lane row whatever the auto-approve setting says, and
+`FailurePatterns.resolve()` returns a `ResolveResult` and is authority-gated.
+
+**The trust lanes gained a producer.** `source_trust` has existed since v8, but
+nothing in the codebase ever wrote `untrusted`, so the lane was a schema column
+with no inhabitants and the quarantine protecting it had never been exercised on
+real data. Ingested third-party content now lands there. Auto-approve was also
+scoped: it could previously clear the review queue for any lane, which quietly
+disarmed the gate it was meant to defer to.
+
+**Erasure exists.** `deleteDataCategory()` had no caller anywhere in the tree, so
+the ingested lake — WhatsApp and email transcripts whose data subjects never
+interacted with Wyrm — had no reachable removal path at all. `forgetData()` is
+that path: dry-run by default, refuses an empty predicate, and sweeps the FTS
+index with the rows so erased content stops being searchable rather than merely
+unlisted.
+
+**The store is owner-only.** `~/.wyrm` was created with the default umask and the
+database landed 0644. Both are now 0700/0600, re-tightened on every open so
+existing installs are fixed rather than only new ones. Inert on a single-user
+laptop, which is how it survived; it bit by default in containers, CI runners and
+the shipped Dockerfile.
+
+**Two gates on every CI build**, not only on flip day: an identity gate (operator
+paths, third-party emails, the client roster, account ids) and a claims gate (a
+comparative rate ships with its denominator or it does not ship). Both found real
+leaks in the release that introduced them, which is the argument for having them.
+
+### Found by cold install, not by the suite
+
+The release was packed with `npm pack`, installed into a scratch `HOME`, and used
+as a stranger would. The 2,697-test suite found none of the following.
+
+- **A full review queue read as an empty store.** A first capture on a fresh
+  machine lands at 60% confidence and is therefore withheld from recall, so the
+  new user's first two actions were "store a thing" and "fail to find the thing I
+  just stored". Worse than silence: recall answered it with *"Use `wyrm_remember`
+  to store knowledge as you work"* — advice that makes a queued store strictly
+  worse, since every new capture joins the queue suppressing the answer. Both
+  recall surfaces now name the queue and the command that clears it, and
+  `queued_for_review` rides the structured body. No ranking changed.
+- **Six stray `@license AGPL-3.0-or-later` headers** from the 6.9.x relicense. The
+  clean-room assembler only rewrites `@license Proprietary`, so these would have
+  published as AGPL files inside an Apache-2.0 repository — one-way incompatible.
+- **`bench/listtools-size.mjs` reported a violation that was not one**, pinning 32
+  tools after the surface pin was deliberately grown to 33.
+- **Documentation still required Ollama** two releases after 8.7.0 bundled the
+  model, invented a signup step that no code path enforces, and stated AGPL as the
+  licence across every launch draft.
+
+The adapters also moved off the `@wyrm` npm scope, which belongs to another
+account, to `@wyrm-mcp/*` — matching `wyrm-mcp`, the package this project owns.
+
+Migration 41. 226 suites / 2,697 tests green.
+
+## [8.7.6] - 2026-08-19 - The grounding ledger becomes load-bearing
+
+8.7.5 shipped attestation but left it inert: the ledger was written only by
+`context_build`, so on the `recall`/`search`/`prime` paths real sessions use,
+there was nothing to attest against. The Stop hook covered Claude Code from the
+transcript; clients that cannot run hooks (claude.ai, desktop, Cowork) had no
+enforcement at all, and those are precisely the surfaces where the server is the
+only thing that knows what it served.
+
+**Migration 41 — `served_records`.** A per-connection ledger keyed by an opaque
+`session_key`. Deliberately *not* `run_id`: `WYRM_RUN_ID` is absent from the MCP
+server environment, so `run_id` resolves null at dispatch and every session
+would collapse into one bucket, letting any id ever served to anyone ground a
+citation. For stdio the process is the connection, so an id minted at boot
+identifies the session exactly.
+
+- Recording happens at the single dispatcher chokepoint, reusing the string
+  already serialized for telemetry — every read verb covered, no per-handler
+  surgery. Failure-isolated: a bookkeeping fault never fails a good call.
+- The extractor is deliberately permissive, and the asymmetry is load-bearing:
+  over-recording only makes attestation more forgiving, while a missed record
+  makes it accuse an honest citation. Recall's bare `(ID: n)` heading carries no
+  kind word, so it is recorded under every kind rather than guessed at.
+- Pruned on the existing `WYRM_SEEN_TTL_DAYS` knob.
+
+Verified against the live database: one real `wyrm_recall` wrote 20 ledger rows;
+citing a served id attests clean, a fabricated id is flagged, and a second
+connection cannot borrow the first's grounding. 14 tests.
+
+## [8.7.5] - 2026-08-19 - The grounding rules get an enforcement side
+
+8.7.4 shipped grounding rules as server `instructions`. Instructions are
+directives, and a directive is not a guarantee. This makes them checkable.
+
+**`wyrm-citation-audit.mjs`** (new, installed on `Stop`). The transcript is
+already the ledger: everything Wyrm put in front of a session is in it, so a
+record id that appears in the reply but in no tool result, no SessionStart
+brief and no injected context was never retrieved. That is set membership, not
+a judgement call. Ungrounded citations are reported back as context.
+
+- Audits only the final assistant turn's user-facing text. A `tool_use` echoes
+  ids the model is looking up, and `thinking` is not an assertion to the user,
+  so neither counts as a claim.
+- Advisory, never blocking. A false accusation that silently ate a turn would
+  be worse than the problem it polices.
+- Validated on 30 real transcripts: 0 false positives, catches a synthetic
+  fabricated citation.
+
+**`SessionSeen.attest()`** (new). The same check against the in-database
+ledger: returns `served` citations, `unserved` (fabricated) ones, and `unseen`
+records the session was given but never cited. 10 tests.
+
+Known gap, not papered over: `session_seen_artifacts` is still written only by
+`context_build`, so `attest()` is correct but not yet load-bearing on the
+recall/search/prime paths. The Stop hook does not depend on it.
+
+## [8.7.4] - 2026-08-19 - Grounding rules in the server directive
+
+Wyrm's retrieval is not generative — recall is local FTS5 + vector search
+and invents nothing — so the hallucination risk sits entirely on the
+reading side: a model paraphrasing a memory that was never returned, or
+restating a stored claim as if it were still current.
+
+The MCP server `instructions` now carry `WYRM_GROUNDING_INSTRUCTIONS`:
+
+- Claim something is "in memory" only when a tool call in THIS conversation
+  returned it, and cite the id (`mem:NNNN`, `truth:NNN`, `quest:NNN`).
+- Never invent or reconstruct an id, a quest number, or the contents of a
+  memory that was not retrieved.
+- An empty recall is a valid answer — say memory has nothing on it rather
+  than filling the gap from assumption.
+- Stored entries record what was true WHEN WRITTEN: re-verify any file,
+  flag, command, version or endpoint they name before acting on it.
+- Surface conflicts between a stored truth and present observation instead
+  of silently picking one.
+
+The same clause ships in the `wyrm-mcp-edge` connector so local stdio and
+remote surfaces give identical guidance.
+
+## [8.7.3] - 2026-08-18 - Device revoke actually works
+
+`wyrm cloud devices` prints 8-char truncated ids and tells you to run
+`wyrm cloud devices revoke <device-id>`, but revoke passed that argument
+straight to `DELETE /api/v1/devices/:id`, which answers `invalid_device_id`
+(HTTP 400) for anything but a full uuid — and nothing printed full uuids.
+Revoking a device was therefore impossible unless its uuid happened to be
+sitting in a local file.
+
+- `devices revoke` now resolves its argument against the real device list:
+  exact uuid wins, otherwise an unambiguous **prefix** does. A pasted
+  trailing ellipsis is stripped, and no-match / ambiguous cases exit with
+  the candidates listed instead of a bare API error.
+- New `wyrm cloud devices --full` prints whole ids for scripting.
+
+## [8.7.2] - 2026-08-17 - Reverify residuals: docs say what the tool prints
+
+Independent 20-seat re-verify of the 8.7.0 Crucible fixes: 18/20 GREEN,
+2 wording residuals, both closed here. `wyrm-setup --help`, GETTING_STARTED,
+the changelog and EGRESS now carry the one derived model-bundle size
+(**138 MB**, from the sha256 pins) instead of a hand-typed ~137; GETTING_STARTED
+says `wyrm upgrade` *offers* the one-time re-embed and that `wyrm report`
+prints a block (it never wrote a file). No code behaviour change.
+
+## [8.7.1] - 2026-08-16 - Review queue: an operator auto-approve switch
+
+`wyrm review --auto on|off|status` (persisted in `wyrm_meta`, or
+`WYRM_AUTO_APPROVE=1` per process) makes every future write recall-visible
+immediately instead of parking agent-extracted memory in the review queue.
+Off by default: the queue exists so extracted memory is not trusted blindly;
+the operator flips it deliberately. `wyrm review --approve-all` drains what is
+already queued. Existing rows are never touched by the switch itself.
+
+## [8.7.0] - 2026-08-16 - The default install actually works: vectors on, and you can see it
+
+Meaning-based search used to be a manual, Ollama-only opt-in most installs
+never took, so the default install ran keyword-only and nothing said so out
+loud. This release ships local vector search on by default and makes every
+automated behavior visible instead of silent.
+
+### Added: Bundled local vectors, on by default
+
+- `wyrm-setup` now downloads a bundled local embedding model
+  (`nomic-embed-text-v1.5-int8`, 768d, ~138 MB, one time, no account) and
+  turns on tier 2/3 ("local vectors") search automatically. No Ollama, no
+  API key, nothing leaves the machine.
+- The bundled model runs in its own vector scope (`nomic-embed-text-v1.5-int8`,
+  distinct from Ollama's `nomic-embed-text`), so existing Ollama-embedded
+  memories are never silently mixed with a different model's vector space.
+  Measured on real LoCoMo: recall@5/@10 **60.0% / 72.0%**, within the ship
+  gate of the published local-hybrid row (60.3% / 72.2%). Full methodology in
+  `BENCHMARKS.md`.
+- `wyrm vectors download` / `wyrm vectors status` manage the bundled model
+  directly (progress reporting, retry, presence check) for anyone who skipped
+  it during setup or wants to confirm it landed.
+- `wyrm upgrade` is the guided path from tier 2 to tier 3 ("max recall",
+  hosted NVIDIA NIM, 2048d): free API key, masked key entry, a live embed
+  call to validate the key before anything is written, per-client conflict
+  confirmation (never silently overwrites an explicit provider), and an
+  optional one-time reindex of existing memories on the new tier.
+- Existing Ollama setups keep working unchanged. Switching to the bundled
+  tier re-embeds existing memories once, automatically.
+
+### Added: Visible automation, the receipts you didn't have to ask for
+
+Every automated behavior now says what it did, where you're already looking:
+
+- **Statusline receipt.** The search tier (`▲ local vectors 2/3`, `▲ max
+  recall 3/3`, …) and last-session capture count ride the existing statusline
+  segment. `WYRM_RECEIPT=0` turns it off.
+- **Session-start receipt.** The SessionStart hook's `systemMessage` now
+  reports what it restored (or, on a cold start with nothing to restore yet,
+  says so plainly instead of staying silent).
+- **`wyrm_session_prime` receipt line.** The MCP tool response itself now
+  opens with one line: search tier, memory count on file, and which
+  auto-capture path is active (hooks on Claude Code, model-driven
+  elsewhere), so an agent sees its own operating conditions on the very
+  first call of a session, not just on hosts wired up with the CLI hooks.
+- **`wyrm doctor`** gained a tier line (`tier 2/3 (local vectors)`) next to
+  the existing embedding-provider check, with a `next: wyrm upgrade` nudge
+  when sitting on tier 2.
+- **`wyrm-setup`'s closing sequence** now runs real checks, not decoration:
+  model download progress, then a compact health check (search tier, memory
+  file presence, auto-memory hook install), and points to `wyrm doctor` /
+  `wyrm report` for anything that needs a support artifact.
+- **`wyrm report`** includes the resolved tier and embedding provider (never
+  memory content or keys) as the one block to paste when asking for help.
+
+### Added: Paid licenses can now be revoked (and quietly renewed)
+
+A key that has already reached a machine used to be a perpetual fact: nothing
+on the client could ever un-grant it. Now the client honours a **signed
+revocation list** and paid keys are **time-boxed with a silent refresh**:
+
+- `~/.wyrm/revocations.json`: an Ed25519-signed list fetched in the
+  background at boot (bounded, never blocks startup, never throws). Only a
+  signature-verified list is ever cached or written (0o600) — a forged list
+  is ignored and cannot clear a good one (fail-closed on forgery); a
+  stale-but-genuine list is honoured (fail-open on staleness).
+- `hasFeature()` / `verifyLicense()` enforce revocation **and** expiry live,
+  every call — not once at boot — so a revoked or lapsed key drops to the
+  free tier mid-session without a restart. `wyrm license status` says
+  *revoked* when that is the reason.
+- Silent 90-day refresh: a paid key within 14 days of expiry (or lapsed ≤30
+  days) is renewed in the background against `account.ghosts.lk` using the
+  stored account token; a refused refresh (blocked/revoked account) prints one
+  line and leaves the token alone. Perpetual keys never refresh. Nothing about
+  the free tier or existing valid keys changes.
+
+### Fixed
+
+- `parseJsonWithComments` (the JSONC-tolerant client-config parser in
+  `autoconfig.ts`) now tracks string-literal state before matching `//`/`/*`
+  comment markers, so a config value containing a URL (`"https://..."`) is
+  no longer corrupted by comment stripping.
+
+### Fixed (post-merge live test, PR #88 — the terminal is as smart as the MCP lane)
+
+- **`wyrm search` was FTS5-only.** It now runs the same hybrid
+  (FTS ⊕ dense, RRF) recall the MCP `wyrm_recall` handler uses, so a
+  meaning-adjacent query typed by hand finds the memory, with the same
+  provenance footer (or a plain `keyword-only (no vector provider …)` line).
+- **`wyrm capture` did not embed at write time.** The CLI process used to
+  exit before the fire-and-forget index promise settled; captures now embed
+  synchronously before the DB closes and say so (`embedded for semantic
+  recall` / `not embedded yet (wyrm index rebuild will backfill)`).
+- **`wyrm index rebuild` printed green when everything was skipped** (e.g.
+  the bundled model was never downloaded). It now warns with the resolved
+  reason and the exact fix.
+- **Cold-start receipt** said "first session" even with memories on file;
+  `wyrm rehydrate --json` now reports a `memories` count and the SessionStart
+  hook reads `Wyrm: N memories on file. No previous session to restore.
+  Auto-capture is on.` when the brief is empty but memory is not.
+- `wyrm project add <name> --path <dir>` parsed the name as a path; the
+  positional is now the name (a bare existing directory still works), and
+  `wyrm capture --project X` for an unknown project hints how to create it.
+- Setup banner showed a hard-coded `v3.0.0`; it now reads the installed
+  version (falls back to `dev`, never a false number).
+- Setup's failure-firewall line no longer names the product twice.
+- `wyrm doctor`'s vector-index check is model-scoped: coverage is counted
+  under the ACTIVE model, not an unfiltered `vectors` count that double-counted
+  stale rows from a previous provider.
+- `wyrm report` counts CURRENT truths only, matching `wyrm stats`.
+- `wyrm doctor` / `wyrm report` stderr is clean of the DB layer's INFO noise.
+
+### Fixed (release gate check (a): the receipt tells the truth across the process boundary)
+
+- The statusline receipt, `wyrm doctor` and `wyrm report` resolved the search
+  tier from **their own shell's env**. A provider is routinely configured in
+  the MCP client's env block (that is exactly what `wyrm upgrade` writes, and
+  what a vault-backed launcher injects), which a bare shell never sees — so
+  the receipt read `local vectors 2/3` while recall was running NIM 3/3, and
+  doctor told the operator to configure a provider that was already running.
+  The server now publishes what it actually resolved (`wyrm_meta`
+  `embedding_servers`, pid-keyed, dead pids pruned) and the three surfaces
+  prefer the live server that owns their cwd (`· via running server (pid N)`),
+  falling back to env resolution only when no server is up. Recorded for
+  every resolution, `none` included.
+- **`wyrm update` called a failed registry lookup "up to date".** A lookup
+  that could not reach npm was cached for the full 24 h and then served as
+  `Latest: unknown (offline?) · Update available: no · Already up to date` —
+  the daily auto-update timer showed a green tick while the machine sat two
+  releases behind. Now: a failed lookup keeps the last KNOWN version instead
+  of erasing it, is retried after 30 minutes (not 24 h), and `wyrm update` /
+  `wyrm_check_update` say **unknown — npm registry unreachable** (exit code 2
+  from the CLI so a timer run reads as a failure). A stale-but-real "update
+  available" still surfaces during an outage.
+
+### Fixed (release-gate Crucible, 106-agent gauntlet, 20 confirmed → 0)
+
+- **Bundled tokenizer now matches the pinned `tokenizer.json` normalizer.**
+  The in-repo WordPiece pass kept accents (NFC), knew only ASCII punctuation
+  and never isolated CJK, so `café` / `naïve` / any ideograph run / a word
+  glued to a curly quote or em dash embedded as `[UNK]` or the wrong piece —
+  off-distribution vectors for exactly the text agent-written memories are
+  full of. It now applies BertNormalizer faithfully (clean_text, CJK
+  isolation, lowercase → strip accents) and splits on Unicode punctuation;
+  verified id-for-id against the reference `tokenizers` library. ASCII
+  English is byte-identical before and after.
+- `npm run eval:bundled` is a real ship gate now (non-zero exit outside
+  −1.5 pts of the published 60.3/72.2 row; `--no-gate` to print only). Before
+  this the gate lived in a comment.
+- The npm tarball ships `scripts/hooks/wyrm-run-auto.mjs` — `wyrm-setup`
+  installed it from the package but the `files` allowlist left it out, so
+  npm installs quietly reported it missing.
+- Client-config parser: trailing-comma removal is now string-aware, so a
+  value like `"a, ]"` survives a rewrite (the old post-pass regex ran over
+  string literals — silent config corruption).
+- `wyrm upgrade` / `wyrm-setup` write their `.wyrm-backup` copies of client
+  configs as 0600 (they were world-readable copies of files that carry keys).
+- License refresh + revocation fetch bound the FULL body under one deadline
+  (a dripping body used to hang `wyrm license`); the boot fetch only runs
+  when a license key is installed (the free tier makes no `account.ghosts.lk`
+  call), `WYRM_LICENSE_REFRESH=0` disables it, long-lived servers re-check
+  daily, and `docs/EGRESS.md` lists every call. Revocation lists bind the key
+  shape (`WRM-XXXX-XXXX-XXXX-XXXX`) so the signed canonical form is injective,
+  and an older genuine list can no longer replace a newer one (`stale`).
+- The bundled ONNX provider no longer memoises a rejected session load
+  forever; a `.part` larger than the pinned size is discarded instead of
+  dead-ending on HTTP 416.
+- Honest copy: `wyrm license` says **REVOKED** / **EXPIRED** (with the key
+  rows) instead of "free tier (no license key)"; `wyrm upgrade` no longer
+  prints "Upgrade complete" when every client was skipped; `wyrm-setup`
+  re-runs recognise already-installed hooks, only promise "context restored"
+  when hooks exist, name the model download before starting it (`--no-model`
+  / `--plain` documented), and close with the next step that matches the
+  tier you are on; the session-start receipt's arithmetic includes failure
+  patterns; the statusline "saved last session" counts recall-visible
+  memories only; the prime receipt survives pre-8.7 cached fleet briefs;
+  the hash test provider is no longer labelled "local vectors"; one model
+  size label (138 MB, derived from the pins) everywhere; `wyrm vectors status` / `wyrm upgrade`
+  read the live server tier like doctor does; CLI commands default the
+  console log level to `warn` (no DB INFO chatter on `wyrm capture`).
+- Docs: GETTING_STARTED describes the receipts as they actually render;
+  README says "no memory data leaves your machine" and points at EGRESS.md.
+
+### Compatibility
+
+No schema change (still **v40**). Known advisory: `adm-zip` via
+`onnxruntime-node`'s install-time unpacker (no attacker-supplied archive
+reaches it; the fix would pin onnxruntime-node back to 1.21.1). Two new benchmark gates are committed,
+live-run scripts (not CI jobs): `npm run eval:bundled` (bundled-provider
+LoCoMo recall, gated within 1.5 pts of the published 60.3/72.2 local-hybrid
+row) and `npm run bench:parity` (cross-provider cosine similarity between the
+bundled and Ollama vector spaces, informational, not gated, since the two
+spaces are model-scoped by design). Both run locally and at release time,
+since both need a downloaded model. CI itself runs the wasm-lane module-load
+check (the bundled provider imports and initializes cleanly with
+`onnxruntime-node` absent, no model or network required) plus the full unit
+suite. Existing installs with an explicit `WYRM_VECTOR_PROVIDER` are
+unaffected; the bundled default only applies to the previously-silent
+no-provider-configured case.
+**TESTCOUNT**
+
+## [8.6.1] - 2026-08-12 - Self-serve pricing in the README
+
+Docs/discoverability only, no runtime change. The npm README pointed buyers at
+"email ryan@ghosts.lk"; it now carries a Pricing section (Pro $29 / Team $199 /
+Enterprise $499) linking the public self-serve checkout at
+[account.ghosts.lk/pricing](https://account.ghosts.lk/pricing). No code changed.
+
+## [8.6.0] - 2026-08-12 - Negotiated Recall + the Wyrm Lift benchmark
+
+### Added — Negotiated Recall: clean-mode recall you steer
+
+Recall was push-only: Wyrm injected prescriptive memory into every session with no
+consent step, so starting something genuinely new meant fighting the anchor of how
+you did it last time. Negotiated Recall adds a per-run recall policy.
+
+- **`clean` mode** mutes prescriptive memory (`kind` pattern/heuristic, positive
+  lessons) while ALWAYS keeping the failure firewall (anti-patterns, recorded
+  failures) and ground truths. Building fresh never means flying blind past a
+  known dead-end.
+- **Enforced at every v1 recall chokepoint** — `wyrm_recall`, `wyrm_context_build`
+  (default + budgeted), `wyrm_session_prime` (fleet + legacy). The pre-handler
+  dispatcher cache that could serve a cross-run policy-blind brief is closed
+  (`wyrm_context_build` removed from the response cache; a `dispatcherCacheable`
+  carve-out for legacy prime).
+- **Single-sourced mute rule** — `MUTED_KINDS`/`MUTED_OUTCOME` back both the SQL
+  predicate (`mutePredicateSql`) and the JS classifier (`classifyArtifact`), so
+  what clean mode hides and what `wyrm_recall_propose` shows are provably the same
+  rule and cannot drift (property-tested across all kind×outcome combinations).
+- **Two new tools**, hidden from the frozen default surface, callable by name:
+  `wyrm_recall_set` (upsert the policy: mode, muted ids, challenged truths; merge +
+  dedup) and `wyrm_recall_propose` (preview recall grouped into
+  prescriptions / firewall / truths before anything is injected).
+- New `recall_policy` table (migration 40). **Default behavior (no policy) is
+  byte-identical to before** — the whole prior suite stays green.
+- Deferred to fast-follow: CLI `wyrm ls` / `wyrm search` policy parity; the
+  agent-facing negotiation hook + challenge reconciliation.
+
+### Added — Wyrm Lift benchmark: memory as a model-capability amplifier
+
+A 2×2 (model × memory) agent benchmark (`bench/lift.mjs`) proving where a cheap
+model + Wyrm matches a frontier model + Wyrm on the tasks Wyrm has memory for.
+Coverage-honest by construction: the headline is scoped to the covered slice, the
+`by_coverage` denominator is always published, and `coverage:'none'` control
+scenarios prove memory does not help where it should not. `--dry` mode is a real
+regression gate (the thesis assertions fail if the memory plumbing breaks), with a
+permanent leak-guard test so no scenario can name the tool in a model prompt.
+Sibling to the Firewall Receipt — reuses its harness patterns, touches none of it.
+Deferred to P2/P3: live runs (need `ANTHROPIC_API_KEY`), a blind LLM judge to
+replace the oracle scorer, per-arm confidence intervals before any published
+number, and the DragonSpark/ghost model slot (pending weights).
+
+### Compatibility
+
+Additive guarded migration to schema **v40** (an 8.5.x DB opens 100% rows). New
+tools are hidden from the frozen 33-tool default surface, so the advertised surface
+is unchanged. **2,347 tests** across **185 suites**, green.
+
+## [8.5.8] - 2026-07-23 - Un-brickable storage: node:sqlite reachable + auto-fallback for a missing native binding
+
+### Fixed — the node:sqlite backend was dead at runtime; wyrm now self-heals a missing better-sqlite3 binding
+
+Wyrm ships a node:sqlite facade as its zero-native-code escape hatch (opt-in via
+`WYRM_STORAGE=node`), but it was **unreachable in the compiled ESM dist**: the
+availability probe used a bare `require('node:sqlite')`, which throws `require is
+not defined` under ESM, so `WYRM_STORAGE=node` silently fell back to
+better-sqlite3 and the whole backend was dead code. Combined with npm v12's
+skipped native build, a missing better-sqlite3 binding meant a hard crash
+(`Could not locate the bindings file`) with no way out.
+
+- **createRequire fix** (`storage/index.ts`, `storage/node-sqlite-facade.ts`):
+  both modules now build `require` via `createRequire(import.meta.url)`, so the
+  node:sqlite probe and the facade actually work in the ESM dist. Verified in the
+  real dist via a child-process test (`WYRM_STORAGE=node` now selects `node`).
+- **Auto-fallback** (`openDatabase`): a better-sqlite3 **native-binding load
+  failure** (missing/unbuilt addon, ABI mismatch) now falls back to node:sqlite
+  instead of crashing the process, with a loud stderr note and the rebuild
+  command. This is a **rescue, not the default** — better-sqlite3 stays primary
+  for everyone whose binding loads, and only a binding failure triggers it (a
+  real SQL/IO error still surfaces).
+- **Facade validated** (resolves an internal "incomplete subset" concern): the
+  entire suite forced onto node:sqlite passes **2149/2150** — the lone gap is
+  SQLITE_BUSY retry fidelity under heavy concurrent daemon writes, an acceptable
+  degradation for a rescue path whose alternative is a dead process.
+- New `tests/storage-node-fallback.test.ts`; also clears two long-standing
+  `'require' is not defined` lint errors.
+
+## [8.5.7] - 2026-07-23 - Named validation errors at the capture/failure write boundary
+
+### Fixed — two raw TypeErrors where a named client error belongs (faeforest field report, 2026-07-20)
+
+A raw TypeError is indistinguishable from "the tool is broken" — the caller
+can't tell their own mistake from a defect, so both get reported as defects.
+Both reported crashes now return clean, field-named `WYRM_VALIDATION` errors:
+
+- **`wyrm_capture` / `wyrm_remember` `tags`**: the comma-separated string
+  encoding (`tags: "a, b"`) crashed deep in storage with `.join is not a
+  function`. Tags are stored comma-joined, so the string form is lossless —
+  it's now **coerced** to the array it obviously means (new `asTags`
+  boundary validator); any other non-array is a named error.
+- **`wyrm_failure_record`**: a missing `target`/`description` crashed in
+  `record()`'s normalizer (`Cannot read properties of undefined, reading
+  'toLowerCase'`); a missing `scope` surfaced as a raw SQLITE `NOT NULL`;
+  and an out-of-enum `scope` was silently **inserted past the schema**.
+  All three are now named validation errors listing the allowed values —
+  the same contract `wyrm_failure_check` already had.
+- Regression tests: `tests/capture-tags-validation.test.ts`,
+  `tests/failure-record-validation.test.ts`.
+
+## [8.5.6] - 2026-07-23 - `wyrm update` survives npm v12 (allow-scripts on self-update)
+
+### Fixed — self-update no longer bricks wyrm on npm v12+
+
+npm v12 changed the default to **deny dependency lifecycle scripts** (an
+allow-list security feature; `ignore-scripts` is still `false`). So `wyrm
+update` — which shells `npm install -g wyrm-mcp@latest` — installed the new
+version but left `better-sqlite3`'s native binding UNBUILT, and wyrm then died
+on the next DB op with `Could not locate the bindings file`. This bricked wyrm
+for every user on modern npm the moment they updated.
+
+- **`wyrm update` (CLI) and `wyrm_self_update` (MCP tool)** now pass
+  `--allow-scripts=wyrm-mcp,better-sqlite3` so the native addon compiles during
+  the update. Harmless/ignored on older npm (scripts run there by default).
+- New source-lock test `tests/self-update-allow-scripts.test.ts` keeps the flag
+  from silently regressing out of either path.
+- **Docs**: `TROUBLESHOOTING.md` gains a section for the npm-v12 symptom (a
+  *successful* install that then can't open the DB), and the README notes the
+  `--allow-scripts` first-install command for npm v12 users.
+
+Note: a separate latent issue — the opt-in `WYRM_STORAGE=node` backend is
+unreachable in the ESM dist (a bare `require('node:sqlite')` throws) — is left
+for a dedicated, facade-validated pass; the node:sqlite facade implements only
+the API subset the tests exercise, so it is not yet a safe automatic fallback.
+
+## [8.5.5] - 2026-07-23 - Portable, self-healing wyrm resolution in the Claude Code session hooks
+
+### Hardened — Portable, self-healing `wyrm` resolution in the Claude Code session hooks
+
+The npm-global Claude Code hooks (`scripts/hooks/wyrm-*.mjs`) shelled a bare
+`wyrm`, so any environment that spawned a hook with a minimal `PATH`
+(containers, CI, cron, non-login shells) silently disabled auto-memory —
+rehydrate returned an empty brief; capture / run-auto / prune became no-ops —
+with no error, because a memory hook must never break a session.
+
+- **rehydrate, capture, prune, run-auto** now resolve `wyrm` portably: try the
+  bare command first (zero overhead where `PATH` is set), then fall back to the
+  npm/user CLI-install locations that actually exist on the machine
+  (`~/.npm-global/bin`, `~/.local/bin`, `node_modules/.bin`, `/usr/local/bin`,
+  `/opt/homebrew/bin`).
+- Deliberately **not** `/usr/bin`: a distro or global scoped-package can symlink
+  an unrelated `wyrm` there (e.g. the HTTP-server entrypoint), and resolving to
+  the wrong binary is worse than not resolving — it returns success with empty
+  output and silently breaks the hook.
+- Output-identical where `wyrm` is already on `PATH`; a truly unreachable `wyrm`
+  still degrades to a clean no-op (exit 0). No behavior or token change for a
+  standard install — the committed token-economy baseline is unchanged.
+- New source-lock suite `tests/hook-wyrm-resolution.test.ts` asserts every
+  session hook resolves through the fallback resolver, never a bare `wyrm`, and
+  never lists `/usr/bin`.
+
 ## [8.5.4] - 2026-07-23 - Prime resolves by cwd, not machine-wide latest-active
 
 A bare `wyrm_session_prime` (no `project_id`/`project_name`) resolved its
 project as "whichever project wrote the newest session row, machine-wide" —
 so a session on ANY other project silently hijacked every subsequent bare
-prime on the box. Live repro: after a session on another
-project, a bare prime from the current project's directory returned the
-other project's near-empty brief — reading as "Wyrm didn't prime".
+prime on the box. Live repro: after a wyrm-cloud session, priming from
+`/home/you` returned wyrm-cloud (6 truths, 0 quests) instead of kami
+(22 truths, 5 quests) — reading as "Wyrm didn't prime".
 
 - `resolvePrimeProject` now walks the server's cwd first via
   `resolveProjectForPath` (the same resolver wyrm-guard and `failure_record`

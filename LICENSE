@@ -18,8 +18,9 @@ Use of the official Wyrm builds and the Wyrm hosted services is governed by the
 Wyrm Terms of Service and requires a Ghost Protocol account.
 
 HISTORICAL NOTE: versions of Wyrm published on or before 2026-06-14 (the npm
-package "wyrm-mcp" at version 7.2.1 and earlier) were released under
-AGPL-3.0-or-later; that license continues to apply to those specific versions.
+package "wyrm-mcp" at version 7.2.1 and earlier) were released as open source
+under the license text shipped inside those versions' packages; that license
+continues to apply to those specific versions only.
 ALL SUBSEQUENT VERSIONS ARE PROPRIETARY AND ARE NOT OPEN SOURCE.
 
 Commercial and licensing inquiries: ryan@ghosts.lk
