@@ -2,6 +2,179 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [9.2.1] - 2026-09-14 - A quality pass across the whole board
+
+A hands-on audit of 9.2.0 covered the MCP tools, the CLI, the server process, the
+Claude Code hooks, packaging, and the editor and adapter packages. It found defects
+that lost no data but made Wyrm harder to trust or to run. This release fixes them.
+There is no schema change and no ranking change: the tool-discovery benchmark
+(`tests/discovery-bench.test.ts`, 65 queries over the 33 default tools) scores
+96.9% top-1 and 100% top-3, identical to 9.2.0.
+
+### Behaviour changes
+
+- Typed tools no longer put validation or busy errors in `structuredContent`; the
+  same JSON envelope is in the text channel.
+- Arguments that used to be ignored or coerced are now `isError` validation
+  errors, including `approved: "yes"` on `wyrm_review` and `run_scope` values
+  outside its enum on `wyrm_failure_check`.
+- `wyrm_failure_check` without `projectPath` also checks the project containing
+  the working directory.
+- The quest list returns at most 50 quests unless `limit` is given, and reports
+  the total.
+- An explicit `wyrm_capture` with `mode: "truth"` is written, as `wyrm_truth_set`
+  writes, instead of being queued whenever its category already held a truth.
+- `wyrm_share` refusals and "not found" responses are `isError`.
+- CLI errors go to stderr. A `--project` that matches no project exits 1 instead of
+  returning unscoped results, and `wyrm show` exits 1 when nothing is found.
+- `wyrm review --auto` without a value shows the setting. Only `on` or `1` enables
+  auto-approve; `--auto true` is a usage error.
+- `wyrm update` refuses to replace a wyrm that is not a global npm install.
+- `wyrm serve` no longer reads `PORT`; use `--port`, `WYRM_PORT` or
+  `WYRM_HTTP_PORT`.
+- `wyrm doctor` can exit 1 when wyrm-guard hooks are missing or live servers
+  predate the installed package.
+- A non-interactive vault read waits up to 90 seconds for a locked keyring
+  (`WYRM_VAULT_WAIT_SECONDS`, 0 disables).
+- A stdio server exits when its client is gone (below).
+
+### Fixed: MCP tools
+
+- **Responses conform to their outputSchema under the official MCP SDK client**,
+  which rejects a response that does not. Several `wyrm_capture` modes returned
+  bodies without `status`; every mode now returns one, and the enum gains
+  `"skipped"`. A new test drives the built server through the SDK client.
+- **Validation where arguments crashed, reached SQL unchecked or were ignored:**
+  `wyrm_review` (`artifactId`, `approved`; the response echoes the real boolean),
+  `wyrm_failure_check` (`scope`, `run_scope`), `wyrm_share` and `wyrm_unshare`
+  (`kind`, `id`), `wyrm_feedback` (`artifactId`, `success`), `wyrm_truth_set`
+  (`key`, `value`, `confidence` from 0 to 1), quest add (`title`), presence
+  announce (`agent_kind`), `wyrm_decided_because`, capture `mode`, recall `limit`
+  and `kind`, search `type`, stats `view`, capabilities `format`, buddy `size`, and
+  replication `action` (the error lists the valid actions).
+- **Every enum a validator enforces is published in the tool's inputSchema**,
+  including capture `kind` and quest `priority`, and a test keeps the two in step.
+  The validation error no longer claims the schema lists values it did not.
+- `wyrm_share` on a row in a private grove says so and names the fix, instead of
+  "not found".
+- Quest actions accept `quest_id`, `questId`, `id` or `"quest:N"`; goal actions
+  accept `id` or `goal_id`. The "#undefined" messages an unrecognised spelling
+  produced are gone.
+- `wyrm_session_prime` accepts `projectPath`. `wyrm_truth_get`, `wyrm_truth_set`,
+  `wyrm_context_build`, `wyrm_thread` and `wyrm_decided_because` fall back to the
+  working-directory project or name the missing parameter.
+- Recording the same decision edge twice returns the existing edge, and a decision
+  without a rationale is labelled with its truth's key.
+- An auto-classified truth capture is queued as a possible conflict only when an
+  existing truth has the same key or a near-identical statement, not whenever the
+  category holds any truth.
+- Pointers to tools outside the default surface now name CLI commands or default
+  tools, and `wyrm_search` gains `type: "symbols"`.
+- Recall and search receipts report vector coverage. When the active model covers
+  under 25% of eligible memories they say "effectively FTS-only" instead of hybrid.
+  Ranking is unchanged.
+
+### Fixed: the server process
+
+- **A stdio server exits when its client is gone**: stdin closed, stdout EPIPE, or
+  its parent process gone. On stdin EOF it first answers the requests still in
+  flight, for at most `WYRM_STDIO_DRAIN_MS` (default 30 s). Before, a server whose
+  client died was reparented and kept running with `wyrm.db` open and the old code
+  loaded.
+- HTTP: `GET /` reports the package version; the dashboard loads no fonts from a
+  CDN and both CSPs allow no remote host; the unused `/dragon-mark.svg` route is
+  gone; the port is `WYRM_PORT`, then `WYRM_HTTP_PORT`, never `PORT`.
+- `npm pack` no longer leaves the local `dist/` without its type declarations. The
+  published package is unchanged in shape, and its npm description now fits npm's
+  255-character limit.
+- The sovereign sync daemon removes its pid file on exit and treats a stale one as
+  stale.
+- Event pruning skips a store that has no events table without a warning; the
+  warnings that remain name the database path.
+
+### Fixed: the CLI
+
+- **Errors go to stderr.** Under `wyrm vault exec <key> -- wyrm-mcp`, stdout is the
+  MCP channel, and a locked keyring at boot put error text on the wire: Hermes
+  logged 28 parse errors in 7 days.
+- **`wyrm vault` tells a locked or unavailable keyring apart from a missing master
+  key**, and a non-interactive call waits for the keyring with backoff. At boot,
+  Hermes started `wyrm vault exec ... -- wyrm-mcp` before the desktop keyring
+  unlocked and parked its Wyrm connection 33 times on 2026-09-13.
+- **`wyrm update` installs with `--prefix`** set to the npm prefix Wyrm runs from,
+  checks that it is writable, and prints the exact command on failure. It used to
+  fail with EACCES, or install a second copy, where npm's global prefix is `/usr`
+  and Wyrm lives under `~/.npm-global`. The README Quickstart documents the
+  user-prefix install.
+- **`--help` no longer runs the command.** About 20 of 41 subcommands ran on
+  `--help`: `metabolize` and `maintenance` ran, `guard` and `memo` attempted hook
+  installs, `serve` started a server. A help table now drives `wyrm --help`,
+  `wyrm <command> --help` and `wyrm help <command>`, and lists the commands the help
+  used to omit. An unknown command suggests the closest one and exits 1.
+- `wyrm review --auto` no longer switches auto-approve on when asked for its status.
+- A `--project` that matches nothing exits 1 with "Project not found" in `search`,
+  `recall`, `ls`, `presence`, `render` and `reverse-bridge`. Ten commands warn on an
+  unknown flag and suggest the closest real one.
+- `wyrm show` exits 1 on not found or an unknown type prefix.
+- `wyrm capture` reports what it stored ("Stored as memory mem:N (classified as a
+  decision ...)") instead of "Captured as truth" for a memory, and enrols the git
+  repository on first use.
+- `wyrm recall "<query>"` runs a search; `wyrm search` counts matches still in the
+  review queue; a bare `wyrm digest` defaults to `--writes`; `wyrm forget --match`
+  says it covers the ingested data lake only.
+- `wyrm review --approve-all` suggests `wyrm index rebuild` only when an approved row
+  has no vector.
+- `wyrm doctor` checks wyrm-guard hooks when `~/.claude` exists, and lists live
+  servers started before the installed package, which still run the old code.
+- `wyrm setup` detects Claude Code by `~/.claude` or a `claude` binary rather than by
+  `~/.claude.json`, which setup itself writes; counts only real clients; and logs
+  download progress per file when not on a terminal.
+- `wyrm cloud sync` exits 1 when the sync reports errors.
+- `wyrm serve` takes `--port` and always prints the dashboard URL. `wyrm-ui` reads
+  `WYRM_PORT`, passes the port to the server it starts, and answers `--help` without
+  starting anything.
+- Colour only on a terminal, honouring `NO_COLOR` and `FORCE_COLOR`. The store no
+  longer prints "Database checkpoint completed" after every command, and
+  `WYRM_LOG_LEVEL` is no longer written into child processes' environment. Warnings
+  and errors reach `wyrm.log` stamped with the database path, and `WYRM_LOG_DIR` is
+  honoured.
+- `guard` and `memo` warn, instead of showing a success mark, when they armed
+  nothing.
+
+### Fixed: hooks and the session brief
+
+- **The rehydration brief is packed section by section inside its budget**, in the
+  order truths, failures, patterns, quests (ten, then a count), and its receipt
+  counts what the text actually holds. One long truth no longer hides the others.
+  Choosing the session to restore skips Hermes cron runs, and their skill preamble
+  is stripped.
+- The session-rehydrate hook prints "Wyrm unavailable: <reason>. Nothing was
+  restored." when the store, the binary or the call fails, instead of reporting a
+  first session.
+- The citation-audit hook grounds ids served in hook context and in Wyrm tool
+  output (`#N`, `"id":N`), and in a continued chat's parent transcript.
+- The run-auto hook reuses the live run on resume and compact, and never starts one
+  on compact.
+- **New packaged hook `wyrm-prompt-context.mjs`** on `UserPromptSubmit`, installed by
+  setup: one line per record, no auto-session rows, deduplicated within the session,
+  a 1,500-character cap, at least two words shared with the prompt, and no recall on
+  harness notifications. Median 534 ms against 6,453 ms for the unpackaged hook it
+  replaces, on a copy of a store in daily use.
+
+### Fixed: other packages
+
+- `wyrm-lsp`: quest hovers read the compact `GET /q` shape (they showed
+  "undefined"); the npm bin has a shebang (the published 0.1.1 lacks one and does
+  not start, so this needs a wyrm-lsp release); the README is current.
+- VS Code extension: a README, a corrected comment that claimed a shared database, a
+  fixed `docs/VSCODE_EXTENSION.md`, and a repository link to the public repo.
+- The `@wyrm-mcp` adapter READMEs say the packages are not published yet and show how
+  to use them from the monorepo.
+- `scripts/mcp-registry-publish.sh` logs in by DNS when the `.well-known` key file is
+  unavailable, as it has been since the ghosts.lk site was rebuilt.
+
+253 suites / 2,983 tests green (1 skipped).
+
 ## [9.2.0] - 2026-09-13 - NVIDIA retired the NIM models, and nothing said so
 
 NVIDIA retired both of Wyrm's default hosted NIM retrieval models at
