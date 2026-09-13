@@ -2,6 +2,199 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [9.2.0] - 2026-09-13 - NVIDIA retired the NIM models, and nothing said so
+
+NVIDIA retired both of Wyrm's default hosted NIM retrieval models at
+2026-08-25T09:00Z. Every embed and rerank call has answered HTTP 410 since. Wyrm
+caught the error at both embed sites and returned nothing, so on every install
+using the NIM tier new memories stopped being embedded and recall fell back to
+keyword-only, while `wyrm doctor` still showed a green tick. On the reference
+store, 1,591 memories written after the cutoff have no usable vector.
+
+### If you use NIM (`WYRM_VECTOR_PROVIDER=nim`)
+
+Upgrade, then re-embed with `wyrm index rebuild`. A vector made with the retired
+model cannot be compared with any other model's, so none of the old vectors are
+usable again. If you set `WYRM_NIM_EMBED_MODEL` to the retired id yourself, remove
+it or point it at a supported model.
+
+### Changed
+
+- **Default NIM embedding model is now `nvidia/nemotron-3-embed-1b`** (2048
+  dimensions, unchanged). Measured on the committed LoCoMo benchmark
+  (`bench/nim-retrieval.mjs`, 2 conversations, k=10): recall@1 39.9%, recall@5
+  66.4%, recall@10 76.7%, MRR 0.507. The other live candidate,
+  `nvidia/llama-nemotron-embed-vl-1b-v2`, was rejected: it answered an input over
+  8,192 tokens with HTTP 400 despite `truncate: 'END'`, so a long memory would
+  never embed.
+- **Default NIM reranker is now `nvidia/llama-nemotron-rerank-vl-1b-v2`.** Its
+  predecessor was retired the same day, and reranking falls back to fusion order on
+  any error, so opted-in installs silently lost it. Measured over the new embedding
+  model on the same benchmark (301 questions): recall@1 39.9% to 55.5%, recall@10
+  76.7% to 80.1%, MRR 0.507 to 0.630, at about one extra second per query.
+  Reranking stays opt-in (`WYRM_RERANK=1`).
+- **The recall@1 figures previously published for NIM** (33% local, 47% NIM
+  embeddings, 52% with rerank) were measured on the retired models. They are
+  withdrawn from the README and the NIM skill until re-measured across all legs in
+  one configuration.
+- **The NIM skill named environment variables Wyrm never reads**
+  (`NIM_API_KEY`, `WYRM_EMBED_MODEL`, `NIM_BASE_URL`), including in its vault
+  example. Corrected to `NVIDIA_API_KEY`, `WYRM_NIM_EMBED_MODEL` and
+  `WYRM_NIM_BASE_URL`.
+
+### Added
+
+- **`wyrm doctor` checks embedding health.** It fails when the configured model is
+  retired, when the vector store's last embed error is newer than its last
+  success, or when active memories exist newer than the newest vector under the
+  active model. The third signal needs no new bookkeeping, so it also flags stores
+  that stalled before this upgrade.
+- **The vector store records embed failures** (`embed_last_ok_at`,
+  `embed_last_error_at`, `embed_last_error` in `wyrm_meta`) instead of
+  discarding them.
+- **`wyrm visibility <truth|mem|quest>:<id> <within|org|public>`**, an operator
+  command for `cross_project_visibility`: the column that decides both
+  cross-project search and cloud egress. It refuses promotion inside a private
+  grove, bumps `updated_at` so the incremental sync collector actually picks a
+  promoted row up, and says plainly that demotion does not recall copies already
+  synced. CLI-only by design (quest #1148).
+- **A store migrated by a newer Wyrm is detected.** Opening one warns, and
+  `wyrm doctor` fails the Schema check, instead of an older binary writing to it
+  silently.
+
+### Fixed
+
+- **secure_delete was never on.** The erasure path and its CLI message have said
+  "freed pages are overwritten (secure_delete is on)" since 9.0.0. Nothing set the
+  pragma, and better-sqlite3 builds with it off. It is now set on every open, with
+  a test that reads the database file's bytes. Pages freed before upgrading remain
+  until a VACUUM.
+- **Approving a queued memory never embedded it.** All four approval paths cleared
+  `needs_review` with a bare UPDATE, so approved memories stayed keyword-only for
+  good. `MemoryArtifacts.approve()` now does what `add()` does for an active row,
+  and the CLI waits for embeds before it exits. Bulk `--approve-all` stays a single
+  UPDATE and tells you to run `wyrm index rebuild`.
+- **Updating a shared or promoted truth made it private again.** Each new version
+  was inserted with the column defaults; `is_shared` and `cross_project_visibility`
+  now carry forward.
+- **`wyrm_capture` receipts reported the requested review state, not the stored
+  one.** Under auto-approve a live row came back "queued_for_review ... review to
+  activate".
+- **Credential redaction reached only memory inserts and ingest.** It now also
+  covers ground truth values and rationales, quest titles and descriptions, memory
+  updates, and tool-call argument summaries, and it recognises Stripe secret and
+  restricted keys and Google API keys. Rows written before this stay as they were
+  stored; back-filling them is quest #1150.
+- **`tool_call_log` and `usage_events` grew without bound.** Their prune functions
+  existed and nothing called them. The daily sweep now keeps 90 days
+  (`WYRM_TOOL_LOG_RETAIN_DAYS`, `WYRM_USAGE_RETAIN_DAYS`), rolling usage up into
+  `cost_tracking` before deleting.
+
+### Found, not fixed in this release
+
+A read-only audit of a store in daily use since June 2026 produced the fixes above
+and filed the rest with evidence: the bridge push ignores grove privacy (#1149);
+erasure, retention and backups (#1150); recall crowded by auto session captures,
+a ranking change that needs a measured run (#1151); knowledge that never goes
+stale (#1152); index backfill and cleanup (#1153); multi-device integrity (#1154);
+governance under permanent auto-approve (#1155); and the cloud connector's
+retired NIM default (#1156).
+
+237 suites / 2,784 tests green (1 skipped).
+
+## [9.1.2] - 2026-09-04 - setup stops clobbering your config, and doctor stops calling a broken index healthy
+
+### Fixed
+
+- **Setup destroyed customised MCP server entries on every upgrade.**
+  `configureClient` assigned `servers['wyrm'] = freshEntry` outright. The case
+  that caught it: an operator had wrapped the launch command in a
+  secret-manager call to inject an API key, and set an env var selecting the
+  hosted embedding provider. A routine `npm i -g wyrm-mcp` re-ran setup and
+  destroyed both, so the server fell back to the bundled local model and the
+  semantic half of recall went from 73% coverage to 1%.
+
+  Setup now merges. A default-shaped entry is refreshed so upgrades still
+  repoint the binary, but any env you added survives. A customised launcher is
+  kept as it is, and only missing env keys are filled in. Your env always wins
+  over ours, because that is where the settings that change behaviour live.
+  When a launcher is preserved, setup says so. This is the same never-clobber
+  stance the hook installer has always taken for `settings.json`.
+
+- **`wyrm doctor` reported a dead vector index as healthy.** Any non-zero
+  coverage printed a green tick, so an accidental provider switch that
+  stranded 4,344 vectors under the previous model showed as fine at 1%. That
+  silence is how the bug above survived. Doctor now fails loudly when another
+  model holds more vectors than the active one, and names that model, because
+  that sentence is the entire diagnosis. It also fails when a store of 50 or
+  more memories is under 25% indexed.
+
+## [9.1.1] - 2026-09-04 - the token firewall only memoises text
+
+### Fixed
+
+- **Images were being memoised.** 9.1.0 memoised anything the Read tool
+  touched, which meant screenshots and photographs: a 547 KB PNG became a memo
+  whose landmark map was mangled binary, and whose `bytes / 4` token estimate
+  claimed 140,000 tokens for a picture that actually costs a couple of
+  thousand. On the machine this was found, 23 of 52 memos were images and they
+  accounted for 91% of the claimed savings.
+
+  The arithmetic was the smaller half. In `warn` mode a repeat read of an image
+  would have handed the model that mangled binary as context INSTEAD of letting
+  it see the picture, which is a worse outcome than not having the firewall at
+  all. Found by measuring the feature before recommending it be switched on.
+
+  A memo now requires the file to be text, decided by sniffing the head of the
+  file the way `grep` and `file` do (a NUL byte, or more than a tenth
+  non-printable, means binary) rather than by an extension list, because the
+  extension is a hint and the bytes are the truth. Text in any language is
+  unaffected.
+
+## [9.1.0] - 2026-09-04 - the store maintains itself, and stops re-reading what it already read
+
+### Added
+
+- **The store now maintains itself.** `maintenance.ts` has always known how to
+  prune (session_seen_artifacts, served_records, the Live Memory event log,
+  failure_blocks, run_briefs) and to metabolize (supersede exact duplicates,
+  decay stale auto-captures). Nothing ever ran it. Scheduling was left to the
+  operator, which in practice meant every retention setting in the product was
+  a knob that had never once fired, on every install. The store grew, recall
+  ranked over more rows that no longer earned their place, and the only symptom
+  was a database that got slower for reasons nobody attributed to a missing
+  cron entry.
+
+  The MCP server now claims a daily maintenance slot on boot and runs the cheap
+  half in the background, after the transport is already serving. The slot is
+  claimed with one conditional UPDATE, so a machine running many servers at
+  once produces exactly one sweep and the rest return having touched nothing.
+  It never blocks a tool call, never throws, and never VACUUMs behind your back
+  (that keeps an exclusive lock, so `wyrm maintenance --vacuum` stays explicit).
+  `WYRM_AUTO_MAINTENANCE=0` opts out; `WYRM_MAINTENANCE_INTERVAL_HOURS` retunes it.
+
+- **`wyrm doctor` gained two checks**: *Store upkeep* (when the last sweep ran,
+  and a loud failure if it has been more than three days or upkeep is disabled)
+  and *Token firewall* (whether the read memos are armed, and what they have
+  measured). Both exist because the failure mode being fixed here was silence.
+
+- **`wyrm setup` arms the token firewall**, in observe mode. It records what you
+  read in full and counts the repeats; it hands nothing back until you have seen
+  your own numbers and set `WYRM_MEMO_MODE=warn`. A firewall nobody installs
+  measures nothing, which is why arming it is part of setup rather than a
+  paragraph in a README.
+
+- **Token firewall, phase 1.** Two Claude Code hooks (`wyrm-memo`, installed
+  by `wyrm memo`) remember every whole-file read as a hash plus a landmark map
+  in the new `read_memos` table (migration 42), and recognise a repeat
+  whole-file read of an unchanged file above a size floor. `observe` mode
+  (default) counts the repeat and logs the tokens at stake to the savings log;
+  `warn` mode hands the map back as hook context so the model can read a range
+  instead. Never blocks. Raw file text is never stored. `wyrm memo --report`
+  shows memos, repeats and tokens. Measured motivation: on one 157-call
+  session, tool results were about 80k tokens and a large share were re-reads
+  of unchanged files.
+
 ## [9.0.0] - 2026-09-03 - LATCH: make every claim true before the source goes public
 
 The release before the source opens. Scope was deliberately narrow — only work
