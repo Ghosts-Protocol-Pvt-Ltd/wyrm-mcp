@@ -56,6 +56,14 @@ capture  →  store durable facts, lessons, and tasks as you go
 
 Every number Wyrm publishes comes from a benchmark committed to the source, reproducible on your own data. The negative-learning firewall and the recall lift are the two that matter most, and both are covered below.
 
+### The Firewall Receipt
+
+The receipt is the measured proof of one claim: when a failure is on record, the firewall blocks the repeat, stays silent on novel actions, and drops the block once the anchored source drifts, deterministically and with no model in the loop. On wyrm-mcp 9.1.2, measured 2026-09-12, the deterministic bench scores recall 100% (32/32) on same-action and reworded repeats with precision 100% (0 false blocks of 16), and in the blind agent A/B the repeated-failure rate falls from 38.9% (14/36) to 8.3% (3/36), a 78.6% relative reduction with a bootstrap 95% CI of 45.5% to 100% (n=36 per arm). The method, the per-scenario table and the two limits the numbers carry are in [docs/firewall-receipt.md](docs/firewall-receipt.md); the deterministic receipt is regenerated on every push in CI as the artifact `firewall-receipt-node22.x` ([workflow](https://github.com/Ghosts-Protocol-Pvt-Ltd/wyrm-mcp/actions/workflows/ci.yml)).
+
+The failure firewall in twenty seconds: a failure is on record, the agent proposes the same deploy, and the PreToolUse hook refuses it with the recorded reason before the command runs. A variant with an added flag gets an advisory, not a block, which is the honest edge of the deterministic match. Every line in the clip is real hook output.
+
+![The firewall blocking a repeated deploy](assets/firewall-receipt-20s.gif)
+
 ## Why Wyrm
 
 ### It remembers what failed, not just what worked
@@ -84,7 +92,7 @@ Every artifact is tagged with where it came from: you, an agent, an import, or a
 
 ## NVIDIA NIM retrieval (optional)
 
-Local vectors are on by default. NIM is the further step up, for embeddings and reranking, when accuracy is worth a hosted call. On a retrieval benchmark committed in the repo, recall@1 moved from 33% on the local baseline to 47% with NIM embeddings and 52% with NIM reranking added. It is an explicit opt-in, off by default, and the egress is disclosed on every call.
+Local vectors are on by default. NIM is the further step up, for embeddings and reranking, when accuracy is worth a hosted call. On the LoCoMo retrieval benchmark committed in the repo (2 conversations, k=10, measured September 2026), the default NIM embedding model `nvidia/nemotron-3-embed-1b` reached recall@1 39.9% and recall@10 76.7%; adding the NIM reranker (`nvidia/llama-nemotron-rerank-vl-1b-v2`) raised recall@1 to 55.5% across the same 301 questions, at about one extra second per query. Figures published here earlier were measured on models NVIDIA retired on 25 August 2026, and have been withdrawn. It is an explicit opt-in, off by default, and the egress is disclosed on every call.
 
 The guided path is `wyrm upgrade`: a free API key, masked key entry, a live call to validate the key before anything is written, and an optional one-time reindex of existing memories on the new tier. To configure it by hand instead:
 
