@@ -41,6 +41,8 @@ npm install -g wyrm-mcp   # install
 wyrm-setup                # wire it into your AI clients, then restart them
 ```
 
+> **If `npm install -g` fails with EACCES**, npm's global prefix is a directory you cannot write (often `/usr`). Install under a prefix you own instead, and put its `bin` on your PATH: `npm install -g --prefix ~/.npm-global wyrm-mcp`, then `export PATH="$HOME/.npm-global/bin:$PATH"`. `wyrm update` later updates that same install.
+
 > **On npm v12+**, npm denies dependency install scripts by default, which skips `better-sqlite3`'s native build — the install *succeeds* but `wyrm` then fails with *"Could not locate the bindings file"*. Install with the build allow-listed instead: `npm install -g wyrm-mcp --allow-scripts=wyrm-mcp,better-sqlite3` (`wyrm update` already does this for you). See [TROUBLESHOOTING.md](https://github.com/Ghosts-Protocol-Pvt-Ltd/wyrm-mcp/blob/HEAD/TROUBLESHOOTING.md).
 
 Then, from inside your client, ask it to call `wyrm_capabilities` to confirm the connection. The everyday loop is four steps the agent runs on its own once the habit sets in:
