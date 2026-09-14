@@ -2,6 +2,105 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [9.2.2] - 2026-09-14 - Strict arguments and a leaner vault wrapper
+
+Finishes the follow-ups the 9.2.1 audit deferred. Tool calls now reject arguments
+a tool does not accept, as the v8 constitution requires, and the `wyrm vault exec`
+wrapper that sits in front of every MCP server no longer loads the store, the SDK
+or the CLI. There is no schema change and no ranking change: the tool-discovery
+benchmark (`tests/discovery-bench.test.ts`, 65 queries over the 33 default tools)
+scores 96.9% top-1 and 100% top-3, identical to 9.2.1.
+
+### Behaviour changes
+
+- **A tool call with an argument the tool does not accept now fails** with a
+  `WYRM_VALIDATION` error that names each unknown key and suggests the closest valid
+  one. Before, unknown keys were silently dropped, so a misspelled argument did
+  nothing. Every published schema property and every documented alias (the quest and
+  goal id spellings, `validated_fix`/`why_it_worked` and the rest) is still accepted.
+  Set `WYRM_ALLOW_UNKNOWN_ARGS=1` to turn the rejection into a warning on stderr.
+- **Every `wyrm_capture` mode returns `mode` and `refs`** (`"mem:N"`, `"truth:N"`,
+  `"quest:N"`) alongside `status`, and `receipt` where a write receipt exists. The
+  change is additive: every existing field is kept.
+- **Feedback and unshare are reachable from the default tools** as
+  `wyrm_capture mode=feedback` and `wyrm_replication action=unshare`. Messages that
+  pointed at the hidden `wyrm_feedback` and `wyrm_unshare` now point at these routes.
+- `wyrm_capabilities` names every capability by a route the active profile can call,
+  adds a `cli` field for capabilities that only have a CLI command, and reports the
+  active profile's tool count ("33 MCP tools (154 in the full profile)") instead of a
+  fixed 137.
+- Validation errors read "Correct the 'x' argument: ... Then call ... again."
+- The `wyrm` bin now points at `dist/wyrm.js`, a small dispatcher. `wyrm vault exec`
+  runs without loading the rest of the CLI; every other command behaves as before.
+- `wyrm vault exec`: a child killed by a signal now ends the wrapper with the same
+  signal (it used to exit 1); SIGINT, SIGTERM and SIGHUP sent to the wrapper reach the
+  child; if the wrapper's own parent dies, the child gets SIGTERM and, 10 seconds
+  later, SIGKILL. `--as` without a name is a usage error (it used to inject a
+  variable literally named `undefined`), and a command that cannot start prints an
+  error instead of failing silently.
+
+### Fixed
+
+- **The vault wrapper's memory.** Every Claude Code session and the Hermes gateway
+  start Wyrm through `wyrm vault exec`, which stayed resident for the whole session
+  with the full CLI loaded: 61 of Wyrm's own modules. It now loads 5. Measured with a
+  key-file vault, the wrapper's resident memory fell from 66.5 MB to 53.9 MB (bare
+  Node is 47.2 MB).
+- **The Claude Code run map lost sessions and never shrank.** The run-auto hook wrote
+  `~/.wyrm/auto-runs.json` without a lock, so 16 sessions started together kept only
+  13 mappings, and nothing ever removed an entry. It now writes under a lock with an
+  atomic rename, stamps each entry's last use, and drops entries idle for more than
+  7 days. `wyrm run prune [--older-than <days>] [--dry-run]` tidies an existing file
+  and also drops mappings whose run has ended.
+- Busy errors carry the tool name explicitly instead of having it parsed back out of
+  the message text.
+- `wyrm_license` reported a hard-coded "32 MCP tools"; it now reports the real count.
+- The golden-fixture generator refuses to write a call the argument check would
+  reject, and the fixtures were regenerated.
+- Validation, busy, deprecation and CLI-redirect messages no longer contain em dashes,
+  and a test keeps it that way.
+- **A session update over the HTTP API erased fields it was not sent.** `POST /su`
+  passes absent fields as `undefined`, and `updateSession` wrote them as NULL, so a
+  client that saved only its completed list wiped the session's summary and notes.
+  `updateSession` now skips `undefined`; an explicit `null` still clears a field.
+  Found by the VS Code extension's engine mode.
+- **The first request to `wyrm serve` could stall for up to about two minutes.**
+  better-sqlite3 13 builds a Node diagnostic report when it first loads its binding,
+  and that report resolves a hostname for every open socket synchronously; `wyrm
+  serve` opens its store after its listener exists. The storage seam now turns off
+  network data in process reports before it opens a database. The stall appeared in
+  6 of 6 live runs during the extension work and did not reproduce with loopback-only
+  sockets, so its length depends on which sockets are open.
+
+### Other packages
+
+- **wyrm-lsp 0.1.2.** The published 0.1.1 could not start as a command: its bin had
+  no node shebang and was not executable in the tarball, and with the dependencies
+  its lockfile pins the server failed to load (the `vscode-languageserver/node`
+  subpath is the one version 10 exports). 0.1.2 builds against the pinned
+  dependencies and ships an executable bin. Its default API URL follows `WYRM_PORT`,
+  then `WYRM_HTTP_PORT`, on 127.0.0.1, the way `wyrm serve` binds; `WYRM_HTTP_URL`
+  still wins. A test compiles the server and runs an LSP `initialize` over stdio.
+- **VS Code extension 3.1.0 (VSIX).** A new engine mode uses the local Wyrm engine
+  through the HTTP API of `wyrm serve` for quests, sessions, context, ground truths,
+  recall and capture. `wyrm.mode` chooses `auto` (the default: the engine when it
+  answers and accepts the key, otherwise the standalone store), `engine` or
+  `standalone`, and the status bar shows which is active and why. The engine key
+  comes from VS Code secret storage ("Wyrm: Set Engine Token") or `WYRM_TOKEN` and is
+  sent only to loopback or https.
+  - The declared settings `autoInjectContext`, `autoSaveOnClose` and
+    `maxContextTokens` now take effect; `mcpServerPath`, which was never read, is
+    removed.
+  - Closing VS Code no longer closes the database under an unfinished session save.
+  - `better-sqlite3` loads on first use, so a native module that cannot load costs
+    only standalone mode, never activation.
+  - `npm run package:vsix` packages from the lockfile, and the package carries its
+    LICENSE.
+
+wyrm-lsp: 29 tests green. VS Code extension: 83 tests green.
+
+259 suites / 3,050 tests green (1 skipped).
+
 ## [9.2.1] - 2026-09-14 - A quality pass across the whole board
 
 A hands-on audit of 9.2.0 covered the MCP tools, the CLI, the server process, the
