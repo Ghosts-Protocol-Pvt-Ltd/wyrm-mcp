@@ -2,6 +2,247 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [9.2.3] - 2026-09-14 - Wyrm keeps its memory honest over time
+
+The long-term audit of a store in daily use since June (quests #1150 to #1155)
+found that Wyrm kept everything forever, trusted every truth it was ever told, let
+its indexes rot, and could silently lose or resurrect data across devices. This
+release fixes that, plus the HTTP API gaps the editor clients hit (#1164). Schema
+migrations 43 to 49 are additive and forward-safe for stores created on 9.0.x,
+9.1.x and 9.2.x. Tool discovery is unchanged (96.9% top-1, 100% top-3 over 65
+queries) and the default tool surface stays at 33 tools and 7,995 tokens.
+
+### Upgrading
+
+Nothing destructive happens on upgrade:
+- **Failure patterns** that have been quiet for 60 days are downgraded from block to
+  warn, but the quiet clock starts when this release's migration is applied, so an
+  upgrade alone downgrades nothing. `wyrm failure quiet` previews what would move.
+- **Ingest retention** (365 days by default) writes a preview on its first run and
+  deletes nothing for 7 days. `wyrm forget --retention --dry-run` shows what would go.
+- **Stale truths** are marked in briefs and reported by `wyrm doctor` as advisory
+  warnings; they never change doctor's exit code.
+- **Backups:** `wyrm doctor` fails when a Wyrm database copy in the Wyrm home is
+  readable by other users. `wyrm backup legacy --dry-run` shows the fix.
+- **Vectors:** deleting or superseding a row now removes its vectors, and editing
+  embedded text drops the old vector and requeues the row. `wyrm maintenance
+  --dry-run` shows what the first sweep will prune.
+- **Sync:** the first bridge run with the matching connector bridge removes cloud
+  copies of superseded and review-queued memories. Run it with `--plan` first.
+- **Trust lanes:** new harvested, hook, connector and ingested writes are labelled
+  imported. Rows already in the store keep their lane until you run
+  `wyrm review lanes --dry-run`, then `--apply`.
+
+### Behaviour changes
+
+- **Briefs show how old each truth is** and mark truths past their TTL as STALE. New
+  truths get a default TTL by key and category (`WYRM_TRUTH_TTL_DEFAULTS=0` turns
+  defaults off).
+- **Failure patterns with no hits for 60 days warn instead of block**, counted from
+  this release's migration, and recording the failure again re-arms the block.
+- **Ingested third-party data is kept for 365 days** by default
+  (`WYRM_INGEST_RETAIN_DAYS`), after a 7-day grace period with a preview.
+- **`wyrm doctor` fails when a Wyrm database copy is readable by other users.**
+- **New writes from harvest, hooks, connectors and ingestion are labelled imported.**
+  Briefs mark them, and imported rows shaped like instructions are left out of briefs.
+- **A store created by a newer Wyrm opens read-only**; writes fail with both schema
+  versions and the fix.
+- **Recall ranks automatic session summaries lower**, drops English function words
+  from keyword queries (also in `wyrm_search`), weighs confidence, and shows identical
+  content once per result list.
+- **HTTP write routes refuse cross-site requests and non-JSON bodies**, rate limits
+  apply per authenticated principal, and CORS origins follow the port the server
+  binds.
+- **Writes are attributed** `cli`, `http` or `mcp` when nothing more specific names
+  the writer. These ids grant no authority.
+- **The daily maintenance sweep also runs in `wyrm serve` and `wyrm-loop`**, claimed
+  so only one process sweeps a store per day.
+- **Doctor and setup rows read `name: status`.**
+
+### Fixed: erasure, retention and backups (#1150)
+
+- `wyrm forget` follows derived rows: memories tagged with the forgotten source,
+  their vectors and indexing queue entries, and log rows that quote the erased key.
+  Every erasure writes an `erasure_log` row with per-table counts, never the erased
+  text (migration 43).
+- Ingested third-party data (for example transcripts) is retained for 365 days by
+  default (`WYRM_INGEST_RETAIN_DAYS`, 0 or `off` disables), enforced by maintenance
+  after a 7-day grace period.
+- New `wyrm backup create|list|prune|restore|legacy|cloud`: snapshots through the
+  SQLite online backup API (never a raw copy of a live WAL database), files 0600 in a
+  0700 folder, 7 daily and 4 weekly kept, optional encryption with a vault key, and
+  a restore that verifies before and after and pins a pre-restore snapshot.
+- Cloud backup uploads an online-API snapshot instead of copying the database, WAL
+  and shm files; cloud restore no longer leaves a loose plaintext `.bak`.
+- `wyrm maintenance redact --dry-run|--apply [--vacuum]` back-fills credential
+  redaction over existing truths, quests, sessions, memories, failure records, logs
+  and ingested rows, reporting per-table counts only.
+- `wyrm backup cloud` lists snapshots under other machines' prefixes and prunes them
+  on request (dry run first; never this machine's prefix).
+
+### Fixed: knowledge that never went stale (#1152)
+
+- New truths get a default TTL by key and category (14 days for status keys, 30 for
+  version and release keys, 90 for ops, 365 for architecture and conventions, 180
+  otherwise). `WYRM_TRUTH_TTL_DEFAULTS=0` turns defaults off.
+- Briefs show each truth's age and mark truths past their TTL as STALE, and flag
+  truths that name a path that no longer exists.
+- `wyrm truth verify <key|id>`; re-setting a truth with the same value verifies it
+  instead of adding a history row.
+- Setting a truth whose key is already current under another category warns.
+- Supersession writes a `supersedes` decision edge; a `source` made only of typed
+  refs writes `because_of` edges.
+- Served counts are recorded (`served_counts`), and unresolved failures with no hits
+  for `WYRM_FAILURE_QUIET_DAYS` (default 60) downgrade from block to warn with
+  history; recording the failure again re-arms it (migration 44).
+- Parked quests are a real status: `wyrm quest park|unpark|list`, and rehydrate shows
+  them.
+
+### Fixed: index health (#1153)
+
+- `wyrm index backfill [--dry-run] [--limit N]` embeds rows that missed embedding;
+  the daily sweep backfills a bounded batch when the provider is healthy.
+- Vectors are purged when their row is deleted or superseded, and maintenance prunes
+  orphans, superseded rows and old-model duplicates (never the active model of a
+  live row, never a model a live server uses) (migration 45).
+- Vector search streams rows and uses a (model, content_type, project_id) index:
+  global search peak memory growth fell from 154 MB to 60 MB on the reference store,
+  with identical results (840 of 840 result lists).
+- Quest vectors are labelled `quest` instead of `context`.
+- Keyword search plans FTS first; results identical, and far faster under the
+  `node:sqlite` backend.
+- Editing embedded text requeues the row; stuck indexing-queue rows are cleared
+  (migration 47).
+- The daily sweep also runs in `wyrm serve` and `wyrm-loop`, claimed atomically so
+  one process sweeps a store per day.
+- Ended runs older than 90 days are pruned (`WYRM_RUN_RETAIN_DAYS`); graph compaction
+  is opt-in (`--compact-graph`).
+
+### Fixed: HTTP API (#1164)
+
+- `POST /pa` registers exactly one project folder; `GET /p` pages (`limit`, `offset`,
+  `q`, `path`) with the bare response unchanged.
+- Rate budgets are per authenticated principal, with a higher budget for loopback
+  and a separate lockout for failed authentication.
+- `wyrm serve` shuts down within about 4 seconds on SIGTERM even with keep-alive
+  sockets, in-flight requests or SSE streams.
+- **Security:** write routes refuse a foreign `Origin`, `Sec-Fetch-Site: cross-site`
+  and non-JSON bodies, before authentication, in every auth mode; CORS never answers
+  with a wildcard or credentials; the server's own origins follow the port it binds.
+- npm audit findings in the editor packages fixed (0 remaining).
+
+### Fixed: fleet and multi-device integrity (#1154)
+
+- Device lineage: sync cursors live in the store, and a device epoch changes on a
+  restore or copy, so a restored store's new events are never dropped as echoes; the
+  event sequence counter never reuses numbers (migration 46).
+- Cloud pull applies rows by timestamp and records real conflicts in
+  `sync_conflicts` instead of silently replacing the newer row.
+- Federation conflict quests record their quest and close when resolved.
+- Superseded and review-queued memories, deletes and visibility demotions retract
+  copies already pushed.
+- Harvest, bridge, reverse-bridge, metabolize and hook writers are attributed
+  (`WYRM_WRITER_ID` attributes without granting authority).
+- A pulled cloud row never replaces a different local row that happens to share its
+  natural key (skills by name, design tokens by project, category and key); the local
+  row stays and the remote version is recorded in `sync_conflicts`.
+- Plain CLI writes are attributed `cli`, writes that originate in `wyrm serve` `http`,
+  and MCP writes from a client with no name `mcp`, after any explicit agent, writer or
+  specific lane. These ids grant no authority.
+
+### Fixed: governance over time (#1155)
+
+- Every review decision records who made it and when (`reviewed_by`, `reviewed_at`),
+  through the MCP review tool, the CLI, the HTTP review routes and bulk approve. The
+  reviewer is the agent or run when known, otherwise `operator:<WYRM_OPERATOR>`,
+  otherwise the surface (migration 48).
+- New writes from harvest, trace harvest, auto-extract, reverse bridge, connectors,
+  hooks and ingestion go into the imported trust lane. The lane changes how a row is
+  shown in briefs; it never sends a row to the review queue.
+- With auto-approve on, a weekly sample of auto-approved writes (20 by default,
+  `WYRM_REVIEW_SAMPLE_PER_WEEK`) is offered for review without blocking anything:
+  `wyrm review sample`, and doctor, prime and rehydrate mention it.
+- Governance actions are written to the audit chain: approvals and rejections, the
+  auto-approve setting, erasures, applied migrations, truth changes, failure resolve
+  and delete, sharing, visibility and lane changes. Events carry ids, kinds and
+  counts only.
+- `wyrm audit verify` reads the chain in batches and checks signed checkpoints
+  (every 1,000 events by default, `WYRM_AUDIT_CHECKPOINT_EVERY`);
+  `--from-checkpoint` starts after the newest good one. `wyrm audit checkpoint`
+  writes one on demand.
+- A store created by a newer Wyrm opens read-only: reads work, writes are refused
+  with both schema versions and the fix, in the MCP server, the CLI, the HTTP
+  server, the memo and guard hooks, and backup restore. The hooks keep working and
+  only skip their ledger writes. `WYRM_ALLOW_NEWER_STORE_WRITES=1` overrides, and
+  `wyrm doctor` still fails.
+- The session rehydrate brief follows the trust lanes like the context brief:
+  untrusted rows and imported rows shaped like instructions are left out, other
+  imported rows are marked, and a brief made only of your own and your agents'
+  memories is unchanged.
+- When maintenance expires the failures recorded by an abandoned run, it writes one
+  audit event for the sweep.
+
+### Fixed: recall ranking (#1151)
+
+Every change was measured before and after on LoCoMo, the freshness bench and the
+LongMemEval floor; nothing moved outside the committed bands.
+
+| Bench | 9.2.2 | 9.2.3 |
+|---|---|---|
+| LoCoMo keyword, recall@1 / @5 / @10 / MRR | 29.5 / 52.4 / 59.9 / 0.393 | 32.5 / 57.0 / 63.9 / 0.428 |
+| LoCoMo hybrid (bundled model), recall@1 / @5 / @10 / MRR | 32.4 / 60.0 / 72.1 / 0.443 | 33.0 / 60.0 / 71.9 / 0.446 |
+| LongMemEval floor, recall@1 / @5 / @10 / MRR | 69.6 / 95.7 / 100 / 0.813 | 73.9 / 100 / 100 / 0.846 |
+| Freshness | 16 of 16 | 16 of 16 |
+
+- Automatic session summaries (`[auto:*]` rows) are down-weighted on every recall
+  path, not only in the context brief. On a long-lived reference store, automatic
+  rows in the top 10 hybrid results for 20 generic questions fell from 112 to 18, and
+  the first hand-written result moved from an average rank of 6.9 to 1.3.
+- Keyword queries drop English function words. Identifiers, paths, anything with a
+  digit or punctuation, and all-caps acronyms are kept, and a query made only of
+  function words is kept whole. This also applies to `wyrm_search` on sessions and
+  quests.
+- Confidence decay no longer refreshes a memory's `updated_at`, so decayed rows stop
+  looking recent; decay stamps `decayed_at` instead (migration 49).
+- Hybrid ranking weighs confidence with a bounded factor
+  (`WYRM_RECALL_CONFIDENCE_WEIGHT`, default 0.3, 0 turns it off), so low-confidence
+  harvested rows give way to confirmed ones.
+- A result list keeps one copy of identical content within the same trust lane (the
+  best-ranked one). Nothing in the store is merged or hidden.
+- Memories in the operator lane never lose confidence to decay, as documented; the
+  decay selector used to include them.
+- Global recall without vectors also weighs confidence. On the reference store,
+  low-confidence harvested rows in the top 10 for 20 generic questions fell from 84
+  to 53, and the first hand-written result moved from an average rank of 2.3 to 1.0.
+- The context brief applies the automatic-summary penalty once instead of twice;
+  brief contents on the reference store are identical.
+- A store missing a migration between recorded ones (possible when builds from
+  different branches opened the same store) now gets the missing migrations applied,
+  for every migration from 34 on, which are all safe to apply late. `wyrm doctor`
+  reports any gap, and a gap below 34 needs a restore.
+- `bench/auto-crowding.mjs` and a test gate keep this measured: on its synthetic
+  store the recall target is found first in 11 of 12 queries (was 8), and duplicate
+  slots in global top-20 results fell from 51 to 0.
+
+### Changed: wording (#1163)
+
+- Messages, tool descriptions and CLI output no longer use em dashes. Doctor and
+  setup rows read `name: status`, empty placeholders read `never`, `n/a` or `none`,
+  and graph edges print as `[rel]→`.
+- Write-receipt reasons already stored keep their old text; new writes use the new
+  wording.
+- The instruction blocks that `wyrm embed` and `migrate-prompt` compare with existing
+  installs are unchanged, so no install is reported as stale.
+
+### Other packages
+
+- wyrm-lsp 0.1.3: uses the paged project list and scopes quest lookups to the
+  enrolled project containing the file.
+- VS Code extension 3.1.1: registers the folder on Start Session through `POST /pa`
+  and looks project ids up by path.
+
+305 suites / 3,395 tests green (4 skipped).
+
 ## [9.2.2] - 2026-09-14 - Strict arguments and a leaner vault wrapper
 
 Finishes the follow-ups the 9.2.1 audit deferred. Tool calls now reject arguments
