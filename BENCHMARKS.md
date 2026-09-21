@@ -61,16 +61,26 @@ Retrieval recall is the floor. Two more, all reproducible, all local (added 2026
 
 ### Negative learning — the firewall benchmark (the race we own)
 
-No public memory benchmark measures this. `bench/negative-learning.mjs` asks: when an agent is about to **repeat** a recorded mistake, does `wyrm_failure_check` block it — and stay silent on novel actions? Deterministic, no LLM, no cloud.
+No public memory benchmark measures this. `bench/negative-learning.mjs` asks: when an agent is about to **repeat** a recorded mistake, does `wyrm_failure_check` block it, and stay silent on novel actions? Deterministic, no LLM, no cloud. The figures are those of the committed receipt (`bench/firewall-receipt.json`, regenerated on wyrm-mcp 9.2.1, 2026-09-14):
 
 | probe | result |
 |---|---|
 | same action re-attempted (the guard's real input) | **recall 100%** (16/16) |
+| reworded restatement | **recall 100%** (16/16) |
 | novel actions | **precision 100%** · specificity 100% (0 false blocks of 16) |
-| reworded restatement | recall 12.5% — conjunctive-AND FTS is precision-first *by design* |
-| `checkVerdict` latency | p50 ~0.1 ms |
+| confidence separation | 0.86 |
+| staleness oracle | passes |
+| `checkVerdict` latency, in-process (advisory) | p50 0.29 ms · p95 0.58 ms |
 
-Wyrm blocks literal repeats deterministically with zero false alarms. The reworded tier is intentionally conservative; a stopword filter on the fuzzy probe (so incidental filler words can't break the conjunctive-AND) recovered the filler-broken matches — **6.3% → 12.5% with precision held at 100%** (`tests/firewall-recall.test.ts` guards it). Going higher needs OR/threshold matching that would trade away that precision, so the firewall stays precision-first. Run: `node bench/negative-learning.mjs`.
+What the latency row is. The bench times `FailurePatterns.checkVerdict()` called in-process with `process.hrtime`: 48 calls in one process (16 same-action, 16 reworded, 16 novel) against a temporary store that is already open and holds the 16 recorded failures. No warm-up pass is discarded. It is the cost of the check itself. It is not what a hook pays per tool call: a fresh `wyrm-guard` process also pays Node start-up and the store open, and `bench/guard-budget.mjs` measures that separately (median 62 to 66 ms over 30 spawns per path against a 202-row store, same machine, 2026-09-21).
+
+Both are measurements on one machine on one date, not guarantees. The committed figure and the re-runs come from the same machine, a 12th-gen Intel Core i5 laptop (i5-12500H, 16 threads, Linux). Five re-runs on 2026-09-21 (wyrm-mcp 9.2.3, Node 22.23, 1-minute load near 3) gave a median between 0.33 and 0.60 ms and a 95th percentile between 0.67 and 1.47 ms. Latency is advisory: no floor gates it, and it is left out of the receipt's `content_sha256` so that a re-run on the same code reproduces the same hash. `scripts/check-claims.mjs` fails the build if the row above stops matching the committed receipt.
+
+Correction, 2026-09-21: until this date the row read a median of 2.7 ms and a 95th percentile of 6.1 ms. That was a single 9.1.2 run on 2026-09-12, and the row was not refreshed when the receipt was regenerated two days later. The 9.1.2 source re-measured on 2026-09-21 gave a median of 0.34 to 0.38 ms, so the old figure described the machine during that one run, not the engine.
+
+The reworded tier used to sit at 12.5% (8.5.3), because the fuzzy probe was a conjunctive-AND FTS kept precision-first by design. Target normalization (canonical command matching, flag order and `=` form folded, positionals kept in order) closed that gap without giving up a single false block. Run: `node bench/negative-learning.mjs`.
+
+The end-to-end version of the same question, a blind agent working real tickets with and without the firewall in front of its actions, is the agent A/B: repeated-failure rate 38.9% (14/36) without the firewall to 8.3% (3/36) with it, 11 blocks, relative reduction 78.6% (bootstrap 95% CI 45.5% to 100%, n=36 per arm, 3 repetitions). Method, per-scenario table and the stated limits: `docs/firewall-receipt.md`.
 
 ### Embedding-model sweep
 

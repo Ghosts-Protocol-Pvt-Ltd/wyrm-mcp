@@ -15,16 +15,18 @@ If your installation succeeded **and `wyrm` actually runs**, you don't need this
 **Fix** — reinstall with the two packages' build scripts allow-listed:
 
 ```bash
-npm install -g wyrm-mcp --allow-scripts=wyrm-mcp,better-sqlite3
+npm install -g wyrm-mcp --allow-scripts=wyrm-mcp,better-sqlite3,onnxruntime-node,protobufjs
 ```
 
 Or make it the default for all your global installs:
 
 ```bash
-npm config set allow-scripts=wyrm-mcp,better-sqlite3 --location=user
+npm config set allow-scripts=wyrm-mcp,better-sqlite3,onnxruntime-node,protobufjs --location=user
 ```
 
 `wyrm update` passes `--allow-scripts` automatically, so once you're installed correctly, updates won't hit this.
+
+The list names every package in the install that has an install script: Wyrm's own, `onnxruntime-node` and `protobufjs`. `better-sqlite3` stays on it for older installs; from version 13 its native binding ships prebuilt inside the package and it has no install script.
 
 ---
 
@@ -77,7 +79,7 @@ Source build was attempted but the host has no compiler. Either you're on an exo
 | **Arch / Manjaro** | `sudo pacman -S --needed base-devel python` |
 | **openSUSE** | `sudo zypper install -y gcc gcc-c++ make python3` |
 | **macOS** | `xcode-select --install` (provides clang + make); `brew install python3` |
-| **Windows** | `npm install --global windows-build-tools` (or install Visual Studio Build Tools manually) |
+| **Windows** | Install Visual Studio Build Tools with the "Desktop development with C++" workload, plus Python 3. The Node.js installer's "Tools for Native Modules" option sets up both. (The old `windows-build-tools` npm package is deprecated and does not work with current Node.) |
 | **Termux / proot-distro Fedora** | `dnf install -y gcc gcc-c++ make python3 sqlite-devel` (inside the proot guest) |
 | **Docker `node:alpine`** | base image lacks build tools: `RUN apk add --no-cache build-base python3` in your Dockerfile before `npm install` |
 
@@ -116,9 +118,39 @@ npm install -g wyrm-mcp
 
 ---
 
+## 6. Windows: `wyrm-setup` fails with `__dirname is not defined`, or every session says `wyrm CLI not found`
+
+Both were bugs in 9.2.3 and earlier, reported from Windows 11 (Node 24, npm 11, Claude Code) and fixed in the release after 9.2.3. The MCP server, the `wyrm` CLI and `wyrm doctor` were not affected, which is why it looked healthy from a terminal.
+
+**`Setup failed: ReferenceError: __dirname is not defined`.** Setup looked for the server with `which` and a bare `npm`, neither of which can run on Windows, then hit a line that does not work in an ES module. On 9.2.3, pass the server path yourself:
+
+```powershell
+wyrm-setup only claude-code --plain --server "$env:APPDATA\npm\node_modules\wyrm-mcp\dist\index.js"
+```
+
+**`Wyrm unavailable: wyrm CLI not found. Nothing was restored.`** at the start of every Claude Code session, while `wyrm` works in any terminal. The session hooks launched a bare `wyrm`. On Windows that is a `.cmd` shim, which Node will not start without a shell, so nothing was captured or restored. Upgrade, then run `wyrm setup` once more. The hooks now start the CLI's own `dist/wyrm.js` with their own `node`, with no shim and no `PATH` lookup: first from the install that belongs to the running Node, then from npm's default prefix, and last from the path setup records in `~/.claude/hooks/wyrm-cli.json` (which is what finds a custom prefix, Volta, Scoop or pnpm). To check it without opening Claude Code:
+
+```powershell
+'{}' | node "$env:USERPROFILE\.claude\hooks\wyrm-session-rehydrate.mjs"
+```
+
+The answer is one line of JSON. A healthy `systemMessage` contains `Wyrm:` or `Wyrm restored`. A broken one contains `Wyrm unavailable`.
+
+**Red `NativeCommandError` blocks during setup in Windows PowerShell 5.1.** PowerShell 5.1 renders anything a program writes to stderr as an error. Wyrm's informational log lines go to stderr, so a successful setup looked like a failure. Setup now logs warnings and errors only, like the rest of the CLI. `$env:WYRM_LOG_LEVEL='info'` brings the lines back.
+
+**npm skipped the install scripts.** See section 0. This was seen on npm 11.17 as well as npm 12. In PowerShell, quote the flag so the commas survive on older npm shims: `npm install -g wyrm-mcp "--allow-scripts=wyrm-mcp,better-sqlite3,onnxruntime-node,protobufjs"`.
+
+**`wyrm-setup` cannot be loaded because running scripts is disabled on this system.** That is PowerShell's execution policy refusing npm's `.ps1` shim, not Wyrm. Run the `.cmd` shim instead: `wyrm-setup.cmd`, `wyrm.cmd`, `npm.cmd`.
+
+**`wyrm update` fails with `EPERM` or `EBUSY`.** Windows will not replace a file that is open, and a running Wyrm MCP server keeps the native SQLite module open. Close Claude Code and any editor running the server, then update. For the same reason the `wyrm_self_update` tool does not run on Windows; it prints the command instead.
+
+**The statusline.** On Windows it is computed in-process on every render. There is no statusline daemon there: the only endpoint it could listen on is a named pipe, which another local user could claim first.
+
+---
+
 ## Still stuck?
 
-Open an issue at https://github.com/Ghosts-Protocol-Pvt-Ltd/Wyrm/issues with:
+Open an issue at https://github.com/Ghosts-Protocol-Pvt-Ltd/wyrm-mcp/issues with:
 - The full `npm install` output (especially the `gyp ERR!` lines)
 - `node --version`, `npm --version`, `uname -srmo`
 - The output of `cat /etc/os-release` (Linux) or `sw_vers` (macOS)

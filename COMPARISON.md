@@ -57,6 +57,11 @@ convs / 1,982 evidence-bearing QA, k=10; re-run 2026-06-27, HEAD).
 \* the embedding model is a local Ollama call, not a generative LLM; the FTS floor needs
 no model at all and is the CI-gated, fully-deterministic number.
 
+These rows were measured through Ollama. Since 8.7.0 the default install embeds
+in-process with a bundled int8 build of the same model and needs no Ollama. Swapped into
+the same harness on 2026-08-14 it measured recall@1 32.5, recall@5 60.0, recall@10 72.0,
+MRR .443 (see [`BENCHMARKS.md`](./BENCHMARKS.md)).
+
 ### Competitors — QA answer accuracy (LLM-judge), vendor-self-reported
 
 | System | Benchmark | Metric | Score | Source |

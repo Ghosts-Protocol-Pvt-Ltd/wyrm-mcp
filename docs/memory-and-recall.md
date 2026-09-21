@@ -1,4 +1,3 @@
-
 # Memory and recall
 
 Good recall starts with good capture. This skill covers both sides: how Wyrm
@@ -47,17 +46,20 @@ signal. When in doubt, ask whether a future session would want this back.
 
 ## Embeddings
 
-The vector index needs an embedding provider. The default chain auto-detects a
-local Ollama model (`nomic-embed-text` on `localhost:11434`) and falls back to
-FTS-only if none is present. Local embeddings keep everything on your machine.
+The vector index needs an embedding provider. The default is a small local
+embedding model that `wyrm-setup` downloads the first time you run it. It runs
+in-process, needs no account and makes no hosted call, so recall is hybrid from
+the first session. If the model is missing, recall falls back to keyword search
+and `wyrm doctor` says so. An existing Ollama setup keeps working unchanged.
+Local embeddings keep everything on your machine.
 
 If you want higher retrieval accuracy and are willing to send text to a hosted
 endpoint, Wyrm can use NVIDIA NIM embeddings and reranking. That path, its
 accuracy lift, its dimensions, and its egress contract are covered in
 `wyrm-nvidia-nim`. One rule to carry over: embedding dimensions must match
 across a store. If you change providers on an existing database, reindex with
-`wyrm_reindex`, because a dimension mismatch makes similarity return zero rather
-than a wrong-but-plausible score.
+`wyrm index rebuild`, because a dimension mismatch makes similarity return zero
+rather than a wrong-but-plausible score.
 
 ## Staleness
 
