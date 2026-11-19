@@ -2,6 +2,86 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [9.5.3] - 2026-11-19 - Fixes: strict MCP clients get the failure verdict, and subagents join runs again
+
+**After updating, run `wyrm setup` once.** Updating alone does not change Claude Code's
+settings.json, so until you run it, subagents started with current Claude Code are not
+recorded on runs. `wyrm doctor` reports it ("Run attribution hook ... run wyrm setup to
+fix") while it is still wired the old way.
+
+### Fixed
+- **`wyrm_failure_check` could answer with an error instead of its verdict.** The tool
+  tells the client what shape its answer has (its output schema). That description
+  listed three kinds of match (`exact`, `fuzzy`, `target`), but Wyrm also answers with
+  two more: `canonical` (the same command with its flags in another order) and
+  `related` (a recorded warning written as prose, such as "never run pkill -f ...").
+  Some MCP clients check every answer against that description and throw the answer
+  away when it does not fit. The official MCP TypeScript SDK client does this, so a
+  host built on it showed an error in place of the verdict, on exactly the matches
+  that guard commands. Claude Code did not check, which is why this went unnoticed.
+- **Who was affected.** Anyone whose MCP client validates tool answers against the
+  output schema, on any check that found a `canonical` or `related` match. The other
+  three kinds were not affected. The list of kinds is now built from the same constant
+  the code uses, so the two cannot disagree again.
+- **`wyrm_goal_list` could fail in a client that validates answers.** It describes each
+  goal's `max_iterations` as a whole number, but a goal set with a fraction (for example
+  2.5) stored the fraction, and the list then broke in such a client. New goals store
+  the next whole number, which is the limit the goal loop already applied (a cap of 2.5
+  stopped after 3 rounds), and the list rounds a stored fraction up the same way. Found
+  by checking every tool the same way; only the full (legacy) tool surface lists it.
+- **Quest priority is now checked on every write.** `wyrm_all_quests` described quest
+  priority as one of critical, high, medium or low, but two writers (the goal loop's
+  internal tools and the fast HTTP API `POST /q`) stored any word they were given, which
+  broke the list in a client that validates answers. Adding a quest now refuses any
+  other priority, with an error that names the field. Because a quest synced from
+  another install can still carry another word, `wyrm_all_quests` now describes priority
+  as text.
+- **Subagents were not recorded on runs with current Claude Code.** Wyrm's run hook
+  (`wyrm-run-auto.mjs`) records each subagent a session starts. Claude Code now names
+  the tool that starts a subagent `Agent`; it used to be `Task`. Setup listened for
+  `Task` only, and the hook acted on `Task` only, so no subagent joined a run. The hook
+  now accepts both names, and setup listens for `Agent|Task`.
+- **What to do.** Run `wyrm setup` once after updating (see the top of this entry). It moves an existing hook entry
+  that listens for `Task` to `Agent|Task` without adding a second copy. If you share
+  that entry's group with a hook of your own, your hook keeps `Task` and Wyrm's moves
+  to a group of its own. A matcher you changed to something else is left as you set it.
+
+- **`wyrm setup` could delete your Claude Code settings.** When settings.json held a
+  comment (`//` or `/* */`), or anything else stopped it from being read as JSON, setup
+  rewrote it with only Wyrm's hooks, removing your model, permissions and every other
+  setting. Client MCP configs it could not read were replaced the same way, with no
+  backup. Every config setup writes is now read with comments and trailing commas
+  allowed. A file that still cannot be read is left exactly as it was: setup prints the
+  file and the reason, and exits with an error. When a file with comments is rewritten,
+  its original is kept next to it as `.wyrm-backup` first, because comments do not
+  survive the rewrite, and setup says so. A run that changes nothing does not rewrite
+  the file. An existing backup that differs from the file is never overwritten; a new
+  one gets a timestamped name beside it, so the first original can always be recovered.
+  Every config is now written in one step (a temporary file renamed over it), keeping
+  its permissions and, for a symlinked config, the link.
+- **Known limits when Wyrm rewrites a config.** A whole number larger than 2^53
+  (9,007,199,254,740,992) is written back with less precision, and when a key appears
+  twice in the same object only the last value is kept. Both come from reading the file
+  as standard JSON. The backup holds the file exactly as it was.
+- **`wyrm_spec_register` could stop halfway.** With a priority outside critical, high,
+  medium or low, it renamed the quests already registered and then failed before
+  creating the new ones. The priority is now checked before anything is written, and
+  the whole registration is written in one step, so a failure changes nothing.
+- **`wyrm doctor` checks the run hook.** It reports when Wyrm's run hook is still wired
+  only for `Task`, and says to run `wyrm setup`.
+
+### Changed
+- The `run_scope` description on `wyrm_failure_check` is now "Tier filter (run =
+  same-run only)". The word "Quarantine" was dropped to keep the default tool list
+  within its size budget (31,992 characters, about 7,998 tokens counted as
+  characters divided by 4).
+
+### Tests
+- A new test calls every tool that describes its answer, on the default and the full
+  tool surface, through the official MCP SDK client against a seeded scratch store,
+  and fails on any answer the client rejects. A tool that gains an output schema
+  without test cases fails it too.
+
 ## [9.5.2] - 2026-11-19 - Fixes: tidying no longer hides your own memories, and an older Wyrm no longer uploads a newer store
 
 ### Fixed
