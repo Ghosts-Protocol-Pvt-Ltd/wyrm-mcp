@@ -2,6 +2,72 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [9.5.2] - 2026-11-19 - Fixes: tidying no longer hides your own memories, and an older Wyrm no longer uploads a newer store
+
+### Fixed
+- **The automatic tidy-up could hide an operator memory.** Wyrm's tidy-up pass merges
+  exact duplicates: it keeps one copy and marks the rest as superseded (nothing is
+  deleted). It decided two memories were duplicates from their project and text alone.
+  So when the same words existed as an operator memory and as an imported or untrusted
+  copy, or as a lesson and an anti_pattern, the earlier row was kept and the other
+  hidden, whichever it was. When the kept copy was untrusted, recall leaves that lane
+  out, so a search for the operator's own words found nothing.
+- **Who was affected.** Anyone with a store holding the same text in two trust lanes,
+  two kinds, or with different constraints, outcome or sharing. The pass has run by
+  default since 8.1.0 (17 July 2026) each time maintenance runs, and since 9.1.0
+  maintenance also runs by itself once a day when a server starts. `WYRM_METABOLIZE=0`
+  turned it off.
+- **What changes.** Two memories are merged only when they are in the same project and
+  have the same kind, trust lane, constraints, outcome and sharing settings, as well as
+  the same problem and fix text. The earliest of them is kept. A lower-trust copy can no
+  longer hide a higher-trust one, because two rows in different lanes are never merged.
+- **An older Wyrm no longer uploads data from a store a newer Wyrm has upgraded.** A
+  store that a newer Wyrm has migrated already opens read-only in an older one, but that
+  stopped local writes, not cloud sync. `wyrm cloud sync` (with or without `--all`, and
+  the sync daemon) now refuses such a store, says "This store was upgraded by a newer
+  Wyrm ... update Wyrm before syncing. Nothing was sent.", and exits with an error.
+  `--all` also sends only the tables this version knows: any other table is skipped and
+  named in the sync report. `wyrm cloud status` says sync is refused for such a store
+  instead of counting rows waiting to be sent.
+  - Not changed: `wyrm sync export` writes an encrypted copy of the whole store to a file
+    you name and sends nothing over the network, and `wyrm backup create --upload` sends
+    an encrypted snapshot of the whole store, readable only with your vault's backup key,
+    to your own bucket. Both still work on an upgraded store, so you can still back it up.
+
+### Repair
+- **What it does.** Wyrm puts back every memory that an earlier tidy-up hid behind a
+  copy with exactly the same problem and fix text but a different trust lane, kind,
+  project, constraints, outcome or sharing. That is the shape the old merge left. It
+  never deletes anything. Each memory it puts back gets an entry in the write log naming
+  what differs, each batch it puts back gets one entry in the audit log
+  (`governance.metabolize.repair`), and the first run is recorded in the database under
+  `metabolize_lane_repair_952`. It works in batches of 250, each a short write. On a
+  store with 100,000 memories and 10,000 to put back, the first repair at server start
+  took about 2.6 seconds in all; the longest pause was about 0.3 seconds, and another
+  writer waited at most about 1.5 seconds. Later runs take milliseconds.
+- **What it leaves alone.** A memory hidden behind one with different text is left as it
+  is, because other features hide a memory that way on purpose (resolving a sync
+  conflict as merged, and version chains from a newer Wyrm that sync brings in). This
+  means one case of the old damage is not repaired: if the kept copy was edited after the
+  old merge, its twin stays hidden. Its write-log entry from the merge names both
+  memories ("exact duplicate of mem:N"), for as long as the write log keeps it (60 days
+  by default).
+- **When it runs.** Each time a Wyrm server starts (the MCP server, `wyrm serve` and the
+  `wyrm-loop` scheduler, except `wyrm-loop --once`), even when the daily maintenance has already run that day and even with
+  `WYRM_AUTO_MAINTENANCE=0`; and again at the start of every maintenance run (the daily
+  automatic one and `wyrm maintenance`), even with `WYRM_METABOLIZE=0`. A plain CLI
+  command that starts no server does not run it.
+- **Keep every install on 9.5.2.** Any older Wyrm (8.1.0 to 9.5.1) still writing to the
+  same store, such as another client's pinned install or an `npx` cache, or syncing with
+  it from another machine, merges these memories again. 9.5.2 puts them back at its next
+  start or maintenance run, so put every install and every synced machine on 9.5.2.
+- **Dates.** A memory that is put back gets the current time as its last-updated time.
+  The old merge had already replaced its original time, and stamping it is what carries
+  the repair to your other synced machines.
+- **Search.** A restored memory is found by keyword recall straight away. Its search
+  vector was removed when it was hidden, so meaning-based recall finds it again once
+  the daily backfill has re-embedded it.
+
 ## [9.5.1] - 2026-11-19 - Security: replication no longer trusts what the sender claims
 
 Two weaknesses in 9.5.0 were reported privately under our vulnerability disclosure policy
