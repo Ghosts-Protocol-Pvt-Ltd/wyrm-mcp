@@ -2,6 +2,1031 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [9.5.1] - 2026-11-19 - Security: replication no longer trusts what the sender claims
+
+Two weaknesses in 9.5.0 were reported privately under our vulnerability disclosure policy
+(ghosts.lk/security) on 18 November 2026. This release fixes both. Our ratings: Medium for
+the first, Low for the second. Thanks to Loly, an independent security researcher, who
+found them by reading the published package and reported them with care.
+
+Upgrade every machine that syncs with another: a 9.5.0 machine does not read the new
+per-event answers, so it can report success for events a 9.5.1 machine declined.
+
+### Security
+- **Live Memory replication trusted the sender (Medium).** The receiving side took the
+  authoring device, its epoch and sequence number, the actor and the payload from whoever
+  sent them, and removed duplicates on the sender's own key. A caller able to reach
+  `POST /events` on `wyrm serve` (a holder of the HTTP API key, or anyone when HTTP
+  authentication was switched off) could store events attributed to another device, and
+  could claim a device's next keys so that its genuine events were dropped as duplicates.
+  The same key already allows direct memory writes, so this added false attribution and
+  the loss of genuine events, not new write access. Now:
+  - `POST /events` needs an API token. With authentication off, and from the dashboard
+    session, it answers 403, loopback included.
+  - Duplicates are found on the claimed identity plus a hash of the content. A different
+    event under a key that is already held is stored beside it and both are marked
+    `origin_conflict`, so a forged event can no longer make a genuine one disappear,
+    whichever arrives first, on push, on pull, or one hop downstream.
+  - An event that names the receiving store's own device is refused over push, and a
+    device id that only looks like the store's own (case, accents, full-width forms,
+    dash variants, invisible characters) is refused. Ids in any script are still
+    accepted, as 9.5.0 took them from the computer name.
+  - `POST /events` answers per event. The sender reports every refusal each round and
+    retries refused events (up to 200 per peer) instead of reading any 2xx as stored.
+    A refused event never stops a push or a pull.
+- **Federation appliers validated (no network caller in 9.5.0).** `applyRemote` and
+  `applyPull` now take an authenticated peer bound to one project, bound every time a
+  remote row may write to at most five minutes ahead, compare times as instants, and
+  skip a malformed row.
+- **`wyrm_self_update` can no longer install anything (Low).** The handler could start
+  a global npm install of the latest tag with none of the checks `wyrm update` makes.
+  An MCP client could not reach it, because the dispatcher answers with a redirect
+  first, but the code shipped and some text still told agents to call it. The handler
+  now returns that redirect and nothing else, and every update message names
+  `wyrm update` in a terminal.
+
+### Changed
+- **Schema migration 54** adds `received_via`, `content_hash` and `origin_conflict` to
+  `events` and rebuilds its unique key. It is additive and runs once when the store is
+  opened. Tested on stores made by 9.5.0: every row kept, and an interrupted migration
+  rolls back.
+- Sync to a machine that runs `wyrm serve` with authentication off is refused. Switch
+  authentication on and give the sender the key.
+- A copy of a store cannot push its own history to the original. Set the original to
+  pull from the copy and the events arrive.
+
+### Not closed in this release
+- Attribution between other devices is still a claim: a key holder can store events that
+  name another device. A different event under a key that device already used is marked;
+  under a key it never used it is not.
+- Over pull, an event naming this device at another epoch is still stored, because
+  restoring a backup and copying a store need it. It is labelled with the channel it
+  came by, never as local.
+- Nothing reads the `origin_conflict` mark yet.
+- A device id that swaps a letter for a look-alike from another script, or the hyphen
+  for one of four rarer dash characters, is treated as a different device.
+- Per-device signing and per-peer, per-project tokens are designed, not built.
+
+### Tests
+Run locally on 19 November 2026 on the release commit (GitHub Actions does not start on
+this repository): `tsc --noEmit` clean, build clean, and the full suite once, `npm test`:
+419 of 420 suites passed and 1 skipped; 5,102 tests passed and 4 skipped, none failed.
+The fix went through four rounds of independent review, each of which tried to break it;
+the first three found a defect that the suite had passed.
+
+## [9.5.0] - 2026-11-16 - Wyrm knows which model it is serving, and the guard gains a policy tier
+
+Wyrm served every model the same brief and did not know which model it was serving.
+The current Claude models do not behave the same, and Anthropic's migration guide says
+where they differ. This release makes three changes on that basis and repairs one
+regression that hurt every model. Nothing here reads, stores or asks for a model's
+reasoning: the API does not return it, and a prompt that asks for it can be declined.
+
+### Added
+- **Model profiles (`src/model-profile.ts`).** The SessionStart hook reads the model
+  the harness reports (SessionStart `model`, else the newest assistant message in the
+  transcript) and the effort level (`effort.level`, else `CLAUDE_EFFORT`), and passes
+  them to `wyrm rehydrate` as `WYRM_MODEL` and `WYRM_EFFORT` (`--model` and `--effort`
+  do the same by hand). A profile exists only where the guide documents the behaviour.
+  Every other model, and one the hook cannot detect, gets the brief exactly as it was.
+  - **Fable 5.2 and Mythos 5.2: scoped cautions.** The failure section lists the
+    project's own critical failures and the failures that share the session's words
+    (at most 5), under the heading "Past failures that match this work", and counts
+    the rest with a pointer to `wyrm_failure_check`. The guide: cautions carried in
+    memory are followed closely enough that the model holds back routine work.
+  - **Working-method text, beside the brief.** Haiku 5.5 at low and medium effort and
+    Sonnet 5.5 at low get Anthropic's tested verification paragraph; Haiku 5.5 at low
+    and Fable 5.2 at low and medium get the tested finish-the-task paragraph. Only for
+    an effort level that was observed: when the harness reports none, no text is added.
+    It is an instruction, not a record, so `wyrm rehydrate --json` returns it as
+    `guidance` and the hook prints it outside the records wrapper, labelled as operator
+    configuration. The hook passes on only paragraphs whose SHA-256 is on its own list
+    (`wyrm-hook-trust.mjs`), so text from whatever answers to `wyrm` on PATH cannot
+    ride that channel.
+  - **Switches.** `WYRM_MODEL_PROFILE=0` gives the baseline always.
+    `WYRM_MODEL_GUIDANCE=0` keeps the profile and drops the text.
+- **Lift benchmark on the current lineup.** `bench/lift.mjs` takes
+  `--models haiku,sonnet,opus,fable` (Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.2) and
+  `--effort`, sends no sampling parameters, sizes `max_tokens` for thinking, records a
+  refusal as no answer and any other early stop in the transcript, and reports each
+  model against Fable (`on_vs_fable_on`). The dry gate now also fails when the brief
+  drops a fact the seeded memory holds. The committed receipt is still the scripted dry
+  run: no live run has been made, so there is no measured number yet for a real model
+  with and without memory.
+- **Recalled memory is screened before it is returned (`wyrm_recall`, `wyrm_search`).**
+  The automatic context briefs already dropped instruction-shaped imported rows; recall
+  and search returned rows verbatim. Both now pass through the same filter
+  (`src/recall-screen.ts`): rows in the `untrusted` lane are dropped, `imported` rows
+  that read like instructions are dropped, and surviving imported rows carry an
+  `[imported]` marker and a `source_trust` tag. Search screens the lexical channel and
+  the semantic artifact leg before ranking. This covers Wyrm's own recall and search
+  output only. It does not see what an agent reads directly from a file, a web page or
+  tool output.
+- **A command-policy tier in wyrm-guard (`src/guard-policy.ts`).** Besides blocking
+  repeats of confirmed recorded failures, the guard now flags the obvious dangerous
+  forms: `trust_remote_code=True`, `pickle.load`/`loads`, `torch.load(` without
+  `weights_only=True`, a direct remote `pip install` (an archive URL, a `git+` ref or a
+  remote requirements file; mirror flags such as `--index-url` are not flagged), a pipe
+  to a shell, a read of a well-known secret path, and a payload carrying a live
+  credential shape. `WYRM_GUARD_POLICY=warn` (default) | `block` | `off`; allowlist via
+  `WYRM_GUARD_POLICY_ALLOW`. With no policy hit the guard's output is byte-identical to
+  before, and a failure block still wins. It reads the command string, not what a
+  script it starts goes on to do, and it fails open, so it is not a sandbox.
+
+### Changed
+- **wyrm-guard shows a similar-only warning once per session.** A match that is only
+  similar to the action is shown the first time it comes up in a session and not again,
+  and the first showing says so. Never quietened: a block, an identity-tier warning, a
+  command that holds the recorded command inside it (with a redirect, a pipe, extra
+  flags or a trailing comment), and a command of three words or more that the record
+  quotes word for word. The
+  record is one small file per session beside the store (`guard-seen/<session>.ids`,
+  one per subagent too), and the SessionStart hook drops it when a session resumes, is
+  cleared or is compacted. Replaying one working session's 84 Bash commands against a
+  snapshot of a 445-failure store: 19 warnings and 14,707 injected characters before,
+  3 warnings and 2,933 characters after, each of the four matching records still shown
+  once. `WYRM_GUARD_REPEAT=1` restores every-time warnings, and its output on that
+  replay is identical to the old guard's.
+- **`wyrm_ask` defaults to `claude-opus-5-5` with effort pinned to `high`.**
+- **wyrm-guard: a related record is one about the command, not one that shares two
+  words.** The advisory text tier (`relatedTextMatches`) took the first word of the
+  whole command and any one other of its first eight words and looked for them anywhere
+  in a record, so `set -e` matched a backup record whose notes said "set" and a command
+  behind `cd dir &&` was never read. Each segment of the command is now read (also what
+  a `$(...)` runs; a heredoc body is data and is dropped) and compared with the
+  record's target only. A record whose target is the action still blocks, whatever an
+  earlier stage labelled it. Replay of one session's 194 Bash commands against a
+  445-failure store: 19 warnings and 18,157 injected characters before, 3 and 3,093
+  after. Given up: a record linked to the command only through its description is no
+  longer surfaced by this tier (the fuzzy tier and `wyrm_search` still read it).
+
+### Fixed
+- **The related text tier matches a record about the command, not one that happens to
+  contain two of its words.** The tier added in 9.4.2 took the first word of the whole
+  command and any one other of its first eight words, and looked for them anywhere in a
+  record's target, description or `why_failed`. So a script that opened with `set -e`
+  matched a backup record whose notes said "set", `grep ... | head` matched every record
+  whose fix said "grep the source", and a command behind `cd dir &&` was never read, so
+  the record about it stayed silent. Now each segment of the command is read (also what
+  a `$(...)` runs; a heredoc body is data and is dropped) and compared with the record's
+  target only. A record is related when one of these holds:
+  - Its target names the command: the tool, then the segment's next two words in order
+    and close by (one word when there is only one, or when the first is a path).
+    `npm publish --tag latest` and "Never run npm publish from a dirty tree".
+  - Its target is prose that names the tool with something only this command carries, in
+    the same case: one of its flags, a path it is given, or a word in capitals.
+    `pkill -f vite` and "Never use pkill -f; it matches the harness".
+  - Its target opens with a recorded command that the segment begins with.
+    `git stash pop` and "git stash in a working tree shared with other agents".
+  - Its target is the probe or one of its segments, in any scope.
+
+  `npm run build` is no longer "npm run verify", and a bare tool name (`ls`, `python3`)
+  is no longer a match by itself. One word is still enough when it names a thing: a
+  script path, or a probe that is not a command (a file's basename). Applies to
+  `wyrm_failure_check` and `wyrm-guard` alike.
+- **A record that is the action blocks, whatever an earlier stage called it.** The text
+  tier labels what it lists `related`, and a related record never blocks. Reading every
+  segment means it can now list, ahead of the identity stages, a record that is one of
+  the segments. Those stages in `wyrm-guard` and `wyrm_failure_check` used to skip a row
+  already listed; they now take the label back (`target` or `canonical`). An adversarial
+  review of the first version of this change found four commands that went from exit 2
+  to exit 0 this way (a record stored with its credential redacted behind `cd app &&`,
+  a command cut at the 1,000 characters the tier reads, a line after `$((1 << n))`
+  misread as a heredoc, and a record of another scope whose target is the command).
+  All four block again and are tests now.
+
+  Measured on one working session's 194 Bash commands replayed through the guard
+  against a snapshot of a 445-failure store: 19 warnings and 18,157 injected characters
+  before, 3 warnings and 3,093 characters after; with `WYRM_GUARD_REPEAT=1`, 79 commands
+  warned before and 13 after.
+  On the reviewer's 60 realistic commands that each have a record on that store, 2 lost
+  their record and 2 gained one; on 77 routine commands, 9 list a record where 48 did.
+
+  What this gives up, by name:
+  - A record whose only link to the command is in its description or `why_failed` no
+    longer surfaces through this tier. The fuzzy tier and `wyrm_search` still read them.
+  - A record about the shape of a script ("a `cd` followed by unchained lines") is not
+    matched by a script of that shape.
+  - A record that names a script by a glob or in other words ("running
+    scripts/*smoke.mjs against production") is not matched by `node scripts/smoke.mjs`.
+- **A context brief item is no longer cut at 240 characters when there is room.** Since
+  9.4.0 every item was cut at 240 characters, even when it was the only one, so a memory
+  holding two facts lost the second. On the Lift benchmark's scripted run the scenarios
+  that memory carries whole fell from 100% to 75%. The items now share the room a full
+  brief's lines take (the caller's item limit times 240, at most 1,200 for one item):
+  by default one or two items get up to 1,200 characters each and ten get 240 each.
+  The largest a brief can be for its caller is unchanged.
+
+### Upgrade notes
+- Install with `npm i -g wyrm-mcp@9.5.0`, then restart whatever holds the old build.
+  No schema migration.
+- Two Claude Code hooks changed (`wyrm-session-rehydrate.mjs`, `wyrm-hook-trust.mjs`).
+  The install refreshes them; a hook edited by hand is left in place with the new copy
+  beside it as `*.wyrm-new`, to merge.
+- The policy tier only warns until `WYRM_GUARD_POLICY=block` is set.
+- wyrm-guard now blocks a command when a recorded failure of another scope targets one
+  of its segments (`cd /srv/app && npm run seed:prod` against a record targeting
+  `npm run seed:prod`). A bare command already blocked this way. `wyrm_failure_check`
+  still answers `blocked:false` for these until the two share one rule.
+
+
+## [9.4.3] - 2026-11-06 - `cloud sync --all` sends only the rows that changed
+
+`wyrm cloud sync --all` filters each table by its `updated_at` against the push mark.
+A table without that column had nothing to filter on, so every `--all` run sent every
+one of its rows again, the cloud stored each copy as a new delta, and `status --json
+--all` counted them all as pending right after a clean sync (quest #1235). A local push
+ledger now lets those tables send only the rows whose content changed. The plain sync
+(the default tables) is unchanged. This release adds no schema migration: the ledger
+table is created the first time a row is recorded, so servers still running 9.4.2 keep
+working against an upgraded store.
+
+### Fixed
+- **`--all` sends a row of a table without `updated_at` only when it changed.** A new
+  local table, `cloud_push_ledger`, records for each such row (by sync kind and row id)
+  a SHA-256 of the row as the cloud last stored it: canonical JSON with its keys sorted.
+  `--all` skips a row whose hash is unchanged, so a new or edited row goes out and the
+  rest do not. Tables with `updated_at` keep the mark and never touch the ledger.
+- **Only what the server stored is recorded.** The ledger is written in one transaction
+  after the push, for the rows of every request the server stored in full: a whole
+  chunk, or one row sent alone after its chunk was split. A row the server refuses is
+  never recorded and is tried again on every `--all`, without holding back the rest of
+  its chunk (3 runs of 50 rows with one always refused end with 49 recorded and 1
+  pending). A request the server did not store in full, and every chunk after a stop,
+  records nothing, and the stop line's count of rows left includes them. A dry run and
+  `status` write nothing.
+- **A row deleted locally leaves the ledger.** While `--all` collects one of those
+  tables it finds the ledger rows whose source row no longer exists, and deletes them in
+  the same transaction as the recording, even when there is nothing to send. A row that
+  only left the push's gates (its grove went private) keeps its entry.
+- **Two syncs no longer run at once on one store.** Every `wyrm cloud sync` (plain,
+  `--all` and dry run) holds a lock beside the store (`wyrm.cloud-sync.lock` for
+  `wyrm.db`, holding the PID and start time) from before it opens the store until it
+  has saved its cursor, released on every way out. Two `--all` runs together could
+  leave an old copy on the server and a ledger saying it was current. A second run
+  prints `another cloud sync is running (pid N, since T); skipped`, sends nothing,
+  writes no ledger or cursor, and exits 75 (`EX_TEMPFAIL`). A lock whose process is gone
+  is taken over, and on Linux so is one whose PID now belongs to another process or
+  that was taken before a reboot (the lock records the process start time from
+  `/proc/<pid>/stat` and the boot id). Only the run holding an exclusive
+  `<lock>.takeover` guard may take over a stale lock, so runs racing for it end with
+  one holder (8 processes on one millisecond, 12 trials). The daemon's ticks, which do
+  not wait for each other, are covered too.
+- **`status --json --all` counts with the ledger.** After a clean `--all`,
+  `push.pending_rows` reaches 0 apart from rows written or changed since. The JSON shape
+  is unchanged.
+
+### Changed
+- **`wyrm cloud sync` refuses a flag it does not know**, exiting 1 and naming it before
+  anything runs. It used to ignore one, so a mistyped flag ran a full sync.
+- **`--since` bypasses the ledger.** With `--since`, every row of those tables is sent
+  whatever the ledger holds, and the ledger is refreshed for what the server stores, so
+  `--since 2000-01-01` still cannot miss a row.
+- The ledger never syncs: `--all` skips it with the other sync internals, and the
+  text-columns registry holds its `kind` and `hash` (the registry guard now builds the
+  tables the store creates on first use, as well as the migrated ones).
+
+### Upgrade notes
+- The ledger starts empty, so the first `--all` after the upgrade sends every row of
+  those tables once more and records them. From then on they go out only when they
+  change.
+- A sync skipped because another holds the store's lock exits 75, not 0 or 1. A monitor
+  or wrapper that alerts on any non-zero exit should treat 75 as "skipped, try later".
+- The copies the cloud stored before 9.4.3 stay in the account. Removing them is server
+  work, left out of this release (quest #1235).
+
+## [9.4.2] - 2026-11-03 - Secrets stay out of every column, and a failed push is retried
+
+A health check of the installed 9.4.1 on 2026-11-03 found a Cloudflare API token stored
+in plain text in a session row and served by search, a cloud push that skipped failed
+chunks and then pushed nothing for ten days, and safety nets that reported green
+without proving anything. This release closes those, finishes the secret-handling work
+begun in the 9.4.0 review (the dashboard credential, the single redactor, the commands
+to retire and purge ground truths), and fixes a skill-graph bug. It adds no schema
+migration, so servers still running 9.4.1 keep working against an upgraded store.
+Restart them anyway, and run the back-fill once (see "Upgrade notes").
+
+### Security
+- **One redactor guards every write.** Redaction used to be applied by some writers
+  and not others. Sessions (created and updated, from the session-capture hook's raw
+  prompt text), quest edits, failure records, data-lake rows, the continuity thread
+  and the call logs stored secrets verbatim. A quest title redacted on create was
+  stored raw after an update. Every free-text writer now passes through the single
+  redactor in `security.ts`, and so does text sent to a remote embedder or reranker.
+  trace-harvest's separate redactor now calls the same one.
+- **More secret formats are recognised.** New patterns:
+  - provider keys: OpenAI project and service-account keys (`sk-proj-`, `sk-svcacct-`),
+    `sk-ant-admin01-`, Stripe live keys and webhook secrets;
+  - platform tokens: `github_pat_`, `npm_`, `hf_`, `glpat-`, `nvapi-`, Slack `xoxb-`/`xoxp-`;
+  - Google `AIza…` keys, and AWS secret keys next to their key id;
+  - Basic auth headers, and passwords inside connection URLs (`postgres://user:pass@host`
+    and others);
+  - env-style, JSON and YAML assignments such as `DB_PASSWORD=` and `"password": "…"`.
+
+  A test corpus of 56 fake secrets must all be caught. A negative corpus of 32
+  strings, including prose, git SHAs, UUIDs, base64 images and URLs without credentials,
+  must come back unchanged. `wyrm maintenance redact` covers the new patterns and every
+  table above, and reports rows per pattern.
+- **The dashboard no longer hands out the API credential.** `/ui` was a public route
+  whose HTML carried a per-process nonce that then authenticated any loopback request.
+  Anything that could reach 127.0.0.1 while `wyrm serve` or `wyrm ui` ran could read
+  and write the whole store. `wyrm ui` now opens the browser at a one-time sign-in link,
+  valid for 120 seconds and usable once, accepted only from loopback with a loopback
+  Host. The link is exchanged for an HttpOnly, SameSite=Strict session cookie bound to
+  that Host. Cross-site and same-site requests with the cookie are refused, and writes
+  also need a same-origin Sec-Fetch-Site or the server's own Origin. Dev mode no longer
+  waives authentication. Bearer-key API clients are unchanged.
+- **Cloudflare API tokens are recognised.** All four documented prefixes (`cfat_`,
+  `cfut_`, `cfoat_`, `cfk_`) followed by the documented 40-character body. Text that
+  only mentions a prefix is left alone.
+- **Values nested past 32 levels are redacted.** `redactCredentialsDeep` used to return
+  anything deeper than 32 levels untouched. It now has no depth limit and survives
+  cycles and an own `__proto__` key.
+- **The log file is redacted.** The logger redacts its message and context, strings and
+  non-strings alike, before stderr or `wyrm.log` sees them. A peer URL with a password
+  in it no longer reaches the log.
+- **Connector settings are hidden from the context tools and closed to them.** The
+  connector configuration (auth token included) and its cursors no longer appear in
+  `wyrm_global_context`, `GET /g` or the internal dispatcher, and `wyrm_set_global` and
+  `POST /g` refuse to write a setting key (a 400 naming the field, never echoing the
+  value). Connectors still read their own settings back as written.
+- **Skill bodies are stored, written and pulled redacted.** `wyrm_skill create` redacts
+  every field before validation and before the file is built, registration reads the
+  redacted body (the operator's own file is never rewritten), and a skill pulled from a
+  peer is redacted with its hash recomputed to match. Documentation placeholders and
+  code that only looks like a secret assignment are left as written: the 9 bundled
+  skills and a 65-string negative corpus come back unchanged.
+- **One registry classifies every text column in the store.** About 270 text columns in
+  63 tables are marked either free text (redact) or held (Wyrm owns it and reads it
+  back), with a schema guard that fails when a column is added without a class. Rows
+  pulled from a peer, and the project `repo` and last-commit fields, follow it.
+- **`wyrm maintenance redact` covers every free-text column.** It streams in batches in
+  short write turns, so a live server is never locked out for long; a second run changes
+  nothing and an interrupted run converges. Names and keys that redact onto an existing
+  one keep a unique `#<rowid>` variant. Skill hashes follow their bodies, failure
+  signatures are rebuilt, vectors of changed rows are dropped, and the full-text indexes
+  are rebuilt and checked. It reports counts by table, column and pattern, never values.
+  On a 242 MB synthetic store it applies in 8 seconds and the second run changes nothing.
+- **The in-process cache follows other processes' writes.** Cached reads end when the
+  store's `data_version` moves, so a `wyrm truth revoke` or `purge` from the CLI is no
+  longer served from the server's 30-second prime cache. A write that commits while a
+  handler is awaiting leaves nothing stale, and a daemon write clears the HTTP server's
+  cached context.
+- **Credential-shaped ids and natural keys are refused at the tool boundary.** A tool
+  argument that names an id or key (an entity's name or type, a truth key, an agent or
+  run id, a design token key, a setting key, a skill name, an event ref id and the like)
+  and looks like a credential is refused with WYRM_VALIDATION naming the field, and ids
+  over 1,024 characters are refused. Old stored ones are counted by the back-fill, not
+  rewritten.
+- **Entity types are labels.** A type such as `auth:secondary-reviewer` or
+  `password:reset-flow` is kept; the token rules (provider keys, private keys, JWTs, URL
+  passwords) redact a real token in a type, in the writer, in inbound sync and in the
+  back-fill. The assignment rule is not applied to a label.
+- **Metabolize quotes each near-duplicate redacted** before cutting it to 160
+  characters, so a token cut at the boundary leaves no head and a whole token is no
+  longer copied.
+- **The fuzz gate.** `tests/redaction-fuzz.test.ts` calls every tool on the legacy
+  surface (154 tools, 263 calls, every action and mode) with a distinct tagged token in
+  every string argument, behind a preload that refuses any non-loopback network use, then
+  searches every column of the store and every file under the scratch home for any tag.
+  It is a permanent suite and found the leaks the items above close.
+
+### Fixed
+- **A failed push is retried.** The cloud push mark used to move to the largest
+  `updated_at` in any chunk that succeeded, so rows in a failed chunk fell below it and
+  were never sent again (the 2026-10-24 full sync logged 572 failed chunks). The push now
+  stops at the first chunk that fails with a network error, timeout, 401, 403, 429 or
+  5xx, saves the mark only through the last unbroken success (and one second below the
+  first failed chunk's earliest stamp), and never lets a row without a stored stamp or a
+  tombstone raise it. A chunk refused with a 400, 404, 409, 413 or 422 is split and sent
+  one delta at a time; a delta still refused is reported by kind and row id and passed
+  over, so one bad row cannot wedge every later sync. A row is passed over only
+  when the server refuses it alone and names it; a refusal about the account or the
+  request (`storage_cap_exceeded`, `invalid_device_id`, `bad_request`) stops the push.
+- **`last_push_at` means last delivered.** It moves only when a push delivered
+  everything it selected, or on a sync with nothing to send; a dry run moves nothing. The
+  new `push.last_push_attempt_at` records every try. A concurrent-edit conflict is
+  measured from the last delivered push, so an edit a stopped push never sent is still
+  recorded as a conflict.
+- **Direct capture validates its input.** `wyrm_capture mode=direct kind=lesson` takes
+  `content` or `title` as the problem when `problem` is absent, answers WYRM_VALIDATION
+  naming the missing field instead of a doubly wrapped error, refuses `content` or
+  `title` given beside `problem` instead of dropping them, and defaults `projectPath` to
+  the project containing the working directory.
+- **The session-capture hook stops saving injected briefs as objectives.** A user-role
+  message that opens with `Facts from memory`, `Recalled from Wyrm's local memory store`
+  or `## Wyrm recall (auto)` is skipped, with the filter list in one constant.
+- **`wyrm_failure_check` names landmines recorded as prose.** A record such as "Never
+  use pkill -f ..." now shows as a related, advisory record when the command shares its
+  terms. It never blocks, never makes the verdict "safe", and `wyrm-guard` is unchanged.
+- **Re-registering a skill keeps what the caller did not pass.** Description, category,
+  author, version and tags keep their stored value unless a non-blank one is given; a
+  new skill takes its description and category from the SKILL.md frontmatter (plain,
+  `|` and `>` scalars, 294 quoted descriptions the old parser missed).
+- **Re-registering a skill keeps its links.** The skill upsert overwrote `governs` with
+  an empty list whenever the caller did not pass it, and `wyrm_skill` had no way to pass
+  it. Every startup re-registration of bundled skills therefore wiped god skills' graph
+  edges. The same reset also demoted god skills to atomic. Fields the caller does not
+  supply now keep their stored value; an explicit `[]` clears and a list replaces.
+  `wyrm_skill` takes `governs`.
+
+### Added
+- **`wyrm truth revoke <id|key> [--reason <tag>]`** retires a truth. The truth leaves
+  briefs, recall, `wyrm truth stale` and doctor's counts, and an audit event records the
+  ids and the reason tag.
+- **`wyrm truth purge <id> --yes`** removes every version of a truth's key, for a truth
+  that should never have been stored, such as one holding a secret. It also removes the
+  rows that reference those versions and log lines that quote their values. It writes
+  cloud tombstones, logs the erasure like `wyrm forget`, and is a dry run without
+  `--yes`. Both commands are operator-only: neither is exposed over MCP or HTTP.
+- **`wyrm cloud status --json [--all]`** prints one JSON object: login, device, the push
+  mark (`mark_ms`, `mark_iso`), `last_push_at`, `last_push_attempt_at`,
+  `pending_rows`, `pending_tombstones` and the mode. An unopenable store is a JSON error
+  with exit 2. The guarded sync script can go red on `pending_rows > 0` with
+  `last_push_at` older than an hour.
+- **`wyrm cloud status` and `wyrm cloud sync` print a pending line**, and switching a
+  grove into a cloud lane prints the row count and the exact `wyrm cloud sync --since
+  <date>` that sends them.
+- **`wyrm cloud sync --since <date|ms>`** re-pushes rows below the mark (inclusive of
+  the date), for rows an earlier build stranded. `--all --since 2000-01-01` re-pushes
+  the whole store; `docs/CLOUD-SYNC.md` has the procedure.
+
+### Changed
+- The VS Code extension and wyrm-lsp need the API key when talking to `wyrm serve --ui`.
+  A plain `wyrm serve` prints no sign-in link; use `WYRM_TOKEN=<key> wyrm-ui` to open
+  its dashboard.
+- Data-lake writes redact every category, including first-party notes.
+- Three advertised `inputSchema` descriptions on the `wyrm_skill` tools (`tier`,
+  `governs`, `composes`) changed wording. No parameter changed.
+- The postinstall script writes `bundled-skills.json` and the first-install marker only
+  on a global install (`npm install -g`, which is also what `wyrm update` runs), into
+  `WYRM_HOME` when it is set, else `~/.wyrm`. The server reads the manifest from the same
+  place. `npx wyrm-mcp` is a local install and no longer writes the manifest, so an `npx`
+  user's first start registers no bundled skills.
+
+### Known, not fixed
+- `wyrm_ask` sends its prompt to cloud chat providers unredacted.
+- A browser sends localhost cookies to every port, so a malicious local server the
+  browser visits could receive the dashboard cookie.
+- Credential-shaped ids arriving through `_meta` actor, the Wyrm-Actor header,
+  `WYRM_AGENT_ID` and `WYRM_RUN_ID`, HTTP routes, CLI paths, inbound sync and federation
+  are not refused at a boundary. Free text from them is still redacted.
+- `wyrm skill export` into a source directory rewrites accepted false positives.
+- Approving a reviewed memory does not re-stamp it for peers.
+
+### Upgrade notes
+- Install with `npm i -g wyrm-mcp@9.4.2`, then restart whatever holds the old build
+  (`hermes-gateway.service`, open Claude Code sessions).
+- Run the back-fill once: `wyrm backup create --encrypt --no-prune`, then
+  `wyrm maintenance redact` (a dry run that prints counts), then
+  `wyrm maintenance redact --apply`, then the dry run again, which should say `Nothing
+  to redact.` Rebuild the embedding index afterwards if you use a remote provider.
+- Stop the sync timers before installing and start them after the re-push, so a tick
+  between install and back-fill cannot push rows the back-fill has not redacted.
+- Re-push what an earlier build stranded: `wyrm cloud status --json`, then
+  `wyrm cloud sync --all --since 2000-01-01 --dry-run`, then without `--dry-run`.
+  Keep plain syncs off until an `--all` run finishes without a stop line, because the
+  push mark is shared between modes.
+- Postinstall writes a changed hook beside a locally edited one as `*.wyrm-new`; merge
+  by hand. A token that was ever stored is still in older snapshots, cloud and bridge
+  copies, and anything embedded from it: revoke it at its source.
+- `docs/superpowers/releases/2026-11-03-wyrm-9.4.2-runbook.md` has the full command
+  list.
+
+## [9.4.1] - 2026-10-04 - The word "constructor" no longer stops a memory embedding
+
+### Fixed
+- **Text containing "constructor" or "__proto__" embeds on the bundled model.**
+  The WordPiece tokenizer looked words up in the vocabulary object parsed from
+  `tokenizer.json`. On a plain object, `vocab['constructor']` is the `Object` function
+  and `vocab['__proto__']` is `Object.prototype`, so either word became a token "id".
+  The provider's BigInt conversion then threw, and that memory, or that recall query,
+  never embedded on the bundled model. Recall fell back to keyword search without
+  saying so, and backfill reported the row as failed on every run. Since 9.4.0 embeds
+  every private grove on the bundled model, the gap now reached any private memory
+  that mentioned a JavaScript constructor; two failed on the store this was found on.
+  The vocabulary is now a `Map`. Text without those words tokenizes exactly as before,
+  so existing vectors stay valid. Rows that failed are picked up by the next backfill
+  (`wyrm index backfill`).
+
+## [9.4.0] - 2026-10-04 - Private stays private, and memory arrives as data
+
+A review of 9.3.1, run against a store in daily use since June, found four problems.
+First, what Wyrm told an agent at session start was chosen more by recency than by
+relevance, cut mid-sentence, and labelled "authoritative" over truths nobody had ever
+verified. Second, text from imported rules, harvested docs and other tools could reach
+the agent with no mark on it, and a single imported line could become a permanent
+ground truth. Third, rows from private groves were sent to NVIDIA for embedding, which
+`docs/EGRESS.md` says never happens: 1,482 vectors on the reviewed store, including
+WhatsApp transcripts. Fourth, the store's durability rested on things nobody had
+scheduled. No backup had run for 19 days and `wyrm doctor` called that healthy, two
+full-text indexes were corrupt where doctor could not see it, and servers starting
+together on an upgrade crashed on the pending migration.
+
+This release fixes all four. It adds no schema migration, so servers still running
+9.3.x keep working against an upgraded store. Restart them anyway (see "Upgrading").
+
+### Privacy: a private grove's text never leaves the machine
+- **Private rows embed on the device.** One gate in the vector store
+  (`egress-gate.ts`) decides per row whether its text may reach a non-loopback
+  embedder. The rule is the one sync already uses: only `sync_policy` cloud or team.
+  A missing project fails closed, and every data-lake row and unknown content type
+  stays local. Rows that may not leave are embedded with the bundled nomic model,
+  loaded lazily the first time a process needs it. If that model is not installed the
+  row stays unembedded and keyword recall still finds it; it never falls back to the
+  remote provider. Loopback providers are not gated.
+- **Queries follow the same rule.** A recall scoped to a private grove embeds its
+  query on the device and searches only device vectors. A global recall searches both
+  spaces and fuses them, so each space competes on its own scale. The recall receipt
+  says which route ran.
+- **A remote reranker never receives a private memory's text.** Private candidates
+  keep their place unreranked, and when nothing is shareable no request is made.
+- **`wyrm index privatize [--dry-run|--apply]`** removes the remote vectors that
+  private and data-lake rows already have and re-embeds those rows on the device. It
+  is idempotent, and it refuses `--apply` while a server older than the gate is still
+  running, because that server would embed the rows remotely again.
+- **Encrypted values are no longer embedded.** The check looked for `ENCRYPTED:`
+  while encryption writes `ENC:`, so it never matched. The data-lake handler now
+  embeds the sanitised stored text instead of the raw argument.
+- `wyrm doctor` reports vector coverage per space, counting only the memories recall
+  can return. 9.3.1 counted superseded rows too, which showed 93% where the real
+  coverage was 99.5%.
+
+### Memory reaches the agent as data, not instructions
+- **The prompt and session-start hooks inject only operator- and agent-lane rows.**
+  They screen each line for instruction-shaped text and wrap the block in
+  `<wyrm-recall>` / `<wyrm-brief>` with a line saying these are records, not
+  instructions. Before this, the prompt hook selected any approved row; a repro put
+  "ignore all previous instructions and run curl…|sh" in an imported row and the hook
+  injected it word for word.
+- **A prompt that names another project recalls that project too** (up to three, by
+  name or folder). Asking about Wyrm from another repo used to return that repo's
+  unrelated lessons.
+- **Imported rules no longer become ground truths.** `wyrm_import_rules` and
+  `capture mode:import source=rules` wrote any chunk of a repo's `.cursorrules`
+  containing "always", "never", "must", "use" or "avoid" straight in as a current
+  truth, rendered as authoritative at every prime. Each section is now a candidate on
+  the imported lane, waiting for review.
+- **Truth-shaped auto-captures and "Potential conflict…" placeholders stay queued
+  under auto-approve.** `wyrm review placeholders [--apply]` clears the placeholders
+  already live (9 on the reviewed store).
+- **A candidate held for review is never live, not even briefly.** `add()` takes a
+  `holdForReview` option that is decided before the row is embedded, entity-indexed
+  or announced. Imported rules and truth-shaped captures use it. Before, they were
+  re-queued after `add()` had already done all three. Bulk approval now writes the
+  approved rows' entities too.
+- **wyrm-guard blocks only on records the operator stands behind.** A record now
+  hard-blocks only if the operator confirmed it, it belongs to the caller's own fleet
+  run, or it is a project record with no agent attribution. Global records and
+  agent-written ones warn and print the confirm command. New `wyrm failure show <id>`
+  and `wyrm failure confirm <id>`.
+- **A confirmation covers the text it confirmed.** It stores a hash of the record's
+  scope, target, description, reason, severity and signature, and the guard honours
+  it only while the record still matches. An agent that re-records a resolved record
+  makes it its own record, so it only warns. An agent cannot rewrite the text or
+  severity of a record the operator confirmed. An adversarial review of this release
+  showed the gap: re-recording a resolved, confirmed record brought back a hard block
+  that printed the agent's new text as if the operator had confirmed it.
+- **`wyrm_failure_check` agrees with the guard.** It reports a block only where the
+  guard would block, using the same match classes; a fuzzy match warns. It screens
+  and labels each record's text.
+- **The guard's echoed text is screened and labelled as recorded data.** It used to
+  print a stored record's text straight to the model. Who recorded a failure now
+  reaches the model only as an id that passes a strict character check; anything else
+  prints as `[withheld id]`.
+- **Every process that writes says who it is.** wyrm-loop's internal dispatcher
+  writes as `loop`, the MCP server as `mcp`, the replication daemon as `replication`,
+  and the daemon and HTTP API as `http` when the request names no agent. Before,
+  wyrm-loop's writes carried no writer, so the guard treated them as the operator's.
+  The loop could plant a hard block, or re-arm one the operator had resolved, and an
+  agent could steer it there through `wyrm_goal_set`. A write with no attribution that
+  re-opens a resolved record now drops the operator's confirmation. A test fails if a
+  new bin or daemon does not name its writer.
+- Truths and failure text in the session brief are screened and labelled the same
+  way. The session-start brief carries operator- and agent-lane rows only;
+  `wyrm rehydrate --lanes all` widens it.
+
+### Durability
+- **Servers starting together no longer crash on a pending migration.** Each
+  migration takes `BEGIN IMMEDIATE`, re-reads the applied versions under the lock and
+  skips what another process already applied. Waiting for the lock retries with
+  backoff, and a failed migration always rolls back. Measured on 9.3.1: 7
+  synchronised processes opening a store with a pending migration failed 50 of 70
+  opens. Migrations that guessed whether a column existed now check, instead of
+  catching every error as "table may not exist".
+- **Transactions take the write lock up front.** `transaction()` defaults to
+  IMMEDIATE wherever a connection is opened. A deferred read-then-write failed
+  instantly with `SQLITE_BUSY` while another process wrote; it now waits on the busy
+  timeout. Read-only connections stay deferred, and `.deferred` is still available.
+- **Backups run on their own.** The daily store sweep and `wyrm maintenance` take a
+  snapshot when the newest is 20 hours old or more. A snapshot is encrypted when the
+  vault already holds a backup key; nothing creates a key or prompts for one.
+  - The sweep runs inside the MCP server, so it never calls the OS keyring. When the
+    backup key is held there, the sweep skips and leaves the snapshot to
+    `wyrm maintenance`, which may use the keyring because it runs as a one-shot
+    command. A snapshot is written in plaintext only when no backup key is configured
+    at all.
+  - Each run records why it took or skipped a snapshot in `backups/scheduled.json`,
+    and doctor and `wyrm backup list` print that reason.
+  - `wyrm backup create --upload` and `wyrm maintenance` copy the newest encrypted
+    snapshot to R2 when R2 is configured (environment or `~/.wyrm/cloud.env`).
+    Uploads go under a per-store prefix and rotate with the local policy. Copies under
+    the old per-machine prefix stay listed and are never rotated.
+  - A plaintext snapshot is never uploaded.
+  - `wyrm backup create` names each snapshot it prunes.
+- **`wyrm doctor` fails when the newest snapshot is older than
+  `WYRM_BACKUP_MAX_AGE_DAYS`** (default 2) or none exists. It passed at any age before.
+- **Restores refuse what they cannot trust.** A cloud restore needs the encryption
+  key, refuses a blob marked unencrypted and always decrypts, so GCM authenticates
+  it. The R2 sync daemon restores on start only onto a missing or empty store, and
+  detects changes from the main file plus its `-wal`. Before, a restart could restore
+  an older cloud snapshot over recent writes. Its default store path also pointed
+  outside `~/.wyrm`.
+- **`wyrm sync import` refuses while other Wyrm servers hold the store**, unless
+  `--force`. It used to copy the live file without its WAL as the safety copy, then
+  delete the `-wal` and `-shm` files other servers had open. It now restores through
+  the online-backup path, with a verified pre-restore snapshot.
+  - The HTTP server, wyrm-loop and the replication daemon now register as live
+    processes, as MCP servers already did. Before, a running HTTP daemon was invisible
+    to this check and to `wyrm index privatize`.
+- **Corrupt full-text indexes are detected and repaired.** `wyrm maintenance
+  fts-rebuild [--table t,…] [--check]` rebuilds external-content FTS tables. Doctor
+  compares each index's own row count with its content table (24 ms on a 110 MB
+  store). Its old `COUNT(*)` check read the content table and could never fail. On the
+  reviewed store `quests_fts`, `skills_fts` and `design_references_fts` were all
+  corrupt, left behind by an `INSERT OR REPLACE` sync path removed in an earlier
+  release.
+- **`wyrm update` verifies before it installs.**
+  - It checks that the target version's publisher and maintainers match the installed
+    version's.
+  - It stages that exact version with `--ignore-scripts` and requires
+    `npm audit signatures` to pass on the staged tree.
+  - It installs globally with scripts off and checks that every installed package is
+    one the staged tree held. Only then does it run the allowed install scripts, with
+    `npm rebuild`.
+  - Any failure reinstalls the previous version, with scripts off, and rebuilds only
+    the native packages that version already had.
+  - `wyrm update --check` prints one line and exits 0, or 2 when the lookup fails, so
+    a timer can use it to notify instead of install.
+
+### Recall
+- **Briefs are ranked by relevance.** Session prime, `wyrm_context_build` and the
+  session-start rehydrate use the hybrid ranker with a 1.5 s deadline
+  (`WYRM_BRIEF_HYBRID_TIMEOUT_MS`), falling back to keyword ranking. Keyword recall
+  scores by normalised bm25 and term coverage, not rank position, and recency is
+  capped as on the hybrid path. In 9.3.1 recency could double a score, so a memory
+  sharing one word with the task outranked the right lesson.
+- **A brief can say "nothing relevant".** A result must clear a relevance floor: at
+  least two of the task's words, or one carrying half the query's weight. Below it the
+  brief says so rather than injecting the freshest weak match.
+- **One line per item, best first.** Each item is clipped on its own line with its
+  `mem:` id, and the budget is a count of items rather than a character slice that
+  cut the block mid-item. Git commit subjects, bridge worklogs, harvested doc chunks
+  and automatic session digests are labelled episodic and listed after deliberate
+  lessons, no longer under "Proven Patterns".
+- **Truths are ranked for the task, and authoritative only when verified.** Only
+  verified, in-TTL truths whose paths still exist sit under the authoritative header.
+  The rest are listed under "Unverified: check before relying" with their age.
+- **Failures come from the project first.** A global failure is listed only when it
+  shares the session's words. `wyrm_failure_record` files under the caller's project
+  when it runs inside one, instead of leaving the record global.
+- **Search accepts ordinary text.** Terms like `don't`, `c++` and `a/b` no longer
+  throw, and FTS operators typed as words are neutralised. Quest search stays inside
+  the project.
+
+Measured against the reviewed store with keyword ranking (hybrid needs remote calls,
+so it was measured on public sets):
+
+| | 9.3.1 | 9.4.0 |
+|---|---|---|
+| 15 realistic tasks, recall precision@5 | 0.467 | 0.507 |
+| Same tasks, session brief: relevant / shown | 11 / 24 | 41 / 80 |
+| retrieval-eval FTS R@1 / R@5 / MRR | 89.7 / 95.7 / .921 | 94.8 / 97.4 / .961 |
+| LongMemEval floor r@1 / MRR | 73.9 / .846 | 87.0 / .935 |
+| LoCoMo, bundled model, hybrid r@5 / r@10 | 60.0 / 71.9 | 62.8 / 73.1 |
+
+Keyword precision is still only about 0.5 on that store: half of what it holds is git
+history, worklogs and imported docs. The hybrid path was not measured on it.
+
+### Hooks stay current
+- **An upgrade refreshes the hook scripts Wyrm installed.** Setup and postinstall
+  share one copy routine. It replaces a hook only when the installed copy matches a
+  version Wyrm shipped, and never installs an older one. A hook someone changed is
+  left in place, with the new version written beside it as `.wyrm-new`.
+  `WYRM_SKIP_HOOK_REFRESH=1` turns this off. Before, updates never touched installed
+  hooks; on the reviewed machine 6 of 7 were older than the installed release.
+
+### Upgrading
+1. Restart every Wyrm process: reopen MCP clients, and restart wyrm-loop, the HTTP
+   server and the statusline daemon. Until then, servers still on 9.3.x keep
+   embedding private rows remotely. `wyrm doctor` lists any still running.
+2. `wyrm index privatize` to see what egressed, then `wyrm index privatize --apply`.
+   Re-embedding on the device takes minutes per thousand rows.
+3. `wyrm maintenance fts-rebuild --check`, and `wyrm maintenance fts-rebuild` if it
+   reports a table.
+4. `wyrm review placeholders --apply`.
+5. `wyrm failure confirm <id>` for each failure record that should keep blocking.
+   After upgrading, global and agent-written records only warn.
+6. If the guard or the hooks were customised, merge the `.wyrm-new` copies in
+   `~/.claude/hooks`.
+7. Run `wyrm backup create --encrypt` once, so scheduled snapshots are encrypted. If
+   the vault keeps that key in the OS keyring, the in-server sweep skips snapshots,
+   so run `wyrm maintenance` daily (a timer or cron job). Otherwise doctor's Backups
+   row fails after two days.
+
+### Known, not fixed
+- **The device model costs memory.** It uses about 0.4 to 0.6 GB in each process
+  that loads it. Every process that touches a private grove loads its own copy, and
+  the first load adds 1 to 8 seconds to that call. Routing device embeddings through
+  one process would fix both.
+- **New projects start private**, so they get device embeddings rather than NIM
+  until `wyrm grove policy <p> cloud`. The tier label "max recall" does not say so.
+- **The hybrid fusion of the two vector spaces is not benchmarked.**
+- **Sovereign sync still matches pulled rows by per-device ids.** Once a second
+  device syncs, a peer's row can overwrite an unrelated local row with the same id.
+  A failed push chunk still advances the high-water mark, and tombstones in a failed
+  chunk are marked as pushed. The sync payload has no associated data binding kind,
+  row and device.
+- **Two local hardening items remain.** While `wyrm serve` or `wyrm ui` runs, `/ui`
+  hands out the dashboard nonce without credentials. Secret redaction misses several
+  key formats (`sk-proj-`, `github_pat_`, `postgres://` URLs and others) and never
+  runs on session text or quest edits.
+- **`wyrm_ask` may still send retrieved private memories** to a cloud chat provider
+  when one is enabled.
+- An agent with a shell can run `wyrm failure confirm` itself. The confirmation
+  cannot be forged through the MCP tools, the HTTP API or the environment.
+- A run id that passes the character check still prints in the guard's output, capped
+  at 32 characters, so a run can be named like a sentence. Agent ids are still shown
+  raw in the stats failures view, the presence list, run members and quest claims.
+- The injection screen is defence in depth, not a boundary. Base64 split into chunks
+  by spaces gets past it.
+- The `wyrm_self_update` handler still contains the old unverified install. No path
+  can reach it: MCP returns the CLI redirect, and the loop's dispatcher does not list
+  it.
+
+## [9.3.1] - 2026-09-24 - The off switch now switches the renewal off
+
+A one-line fix, shipped on its own because the thing it fixes is a promise the
+documentation makes and the code did not keep.
+
+### Fixed
+- **`WYRM_LICENSE_REFRESH=0` stops the RENEWAL call, not just the two gates in
+  front of it.** The flag was consulted in exactly two places,
+  `licenseRefreshEnabled()` (the boot and daily pass) and `selfHeal()`. The
+  renewal branch inside `refreshLicenseIfNeeded()` was reachable with the flag
+  set and phoned home anyway: measured with a paid licence five days from
+  expiry and the flag set to `0`, it still fetched
+  `/api/v1/license/revocations` and posted `/api/v1/license/refresh`, identical
+  to the control with the flag unset. 9.3.0 rewrote the `docs/EGRESS.md` rows
+  and re-asserted this flag as the off switch against that very row, so the
+  documentation became more specific and stayed wrong. An off switch that does
+  not stop the one call a privacy-conscious user is trying to stop is worse
+  than no switch, because they believe it worked. The check now sits at the top
+  of `refreshLicenseIfNeeded()` itself, so anything reaching that function
+  directly is switched off too, rather than depending on every future caller
+  remembering a gate.
+
+### Known, not fixed
+- Plan upgrades are still invisible to both paths: a Pro holder far from expiry
+  whose account is now Team gets no account call from `wyrm login` or from the
+  self-heal, and stays on Pro for up to 76 days.
+
+## [9.3.0] - 2026-09-23 - Signing in keeps a paid license
+
+Three strands ship together. The first is the one that cost people something:
+`wyrm login` replaced whatever license was installed with a 30-day free one, so a
+Pro, Team or Enterprise holder who signed in was moved to the free tier without a
+word, and nothing ever brought the paid license back. The second is Windows, where
+setup crashed and every session hook failed to find the CLI while everything looked
+healthy. The third teaches `wyrm cloud login` to say which machine it is, so one
+machine stops filling an account's device list.
+
+This release makes the license pass run unattended on every signed-in install. Two
+account-service changes make that safe, and both were deployed on 2026-09-23 before
+this was published: the entitlement lookup now runs ahead of the issuance limits, and
+a perpetual grant is returned as stored rather than re-minted at 90 days. See the
+struck-through entries under "Known, not fixed" below.
+
+### Signing in keeps a paid license
+
+`wyrm login` replaced whatever license was installed with a 30-day free one. A Pro,
+Team or Enterprise holder who signed in was moved to the free tier without a word,
+and nothing ever brought the paid license back.
+
+#### Fixed
+- **`wyrm login` never replaces a paid license with a free one.** It saves the
+  account token as soon as the device flow succeeds, then fetches the signed
+  revocation list, so a license revoked since the last cached list is not kept. A
+  valid paid license with more than 14 days left is then kept and no license call is
+  made (every renewal mints a new key and counts toward the account's issuance
+  limit); the line names the email it was issued to, since that account is the one
+  that renews it. Otherwise login asks the account once for its paid license
+  (`/api/v1/license/refresh`). Only a license issued to the same email may replace
+  the installed one at a lower tier (the account's plan was lowered, and the line
+  says so); one from another email never replaces a valid higher tier, and the line
+  names both emails. With no paid license installed, an account with no paid plan
+  gets the free license as before, and so does a server error on the paid check
+  (the self-heal asks again within a day). A network failure keeps what is installed.
+- **Installs that were already downgraded heal themselves.** With an account token
+  on file and no valid paid license loaded, the server's boot and daily pass (and
+  `wyrm license`) asks the account for its paid license: at most once a day, once a
+  week after the account says it has no paid plan, and not again after it rejects
+  the token until the next `wyrm login`. A paid license that comes back is activated
+  without `force`, so a higher tier written meanwhile stays, and one stderr line says
+  what was fetched. The last attempt is kept in `~/.wyrm/license-refresh.json` so the
+  MCP server, the daemon and the CLI share one throttle. A signed-in install now runs
+  this pass with no license file too; a local-only install (no key, no sign-in)
+  still makes no account call. A rejected sign-in is announced only when a paid
+  license is installed: the free tier needs no sign-in. `WYRM_LICENSE_REFRESH=0`
+  turns it off.
+- **`wyrm license` says what the last account check found.** When the account has
+  no paid plan it names the account and points at `wyrm login` with the licensed
+  email or the signed download; when the sign-in expired under a paid license it
+  says to run `wyrm login`.
+- **`wyrm activate` refuses to replace a valid higher-tier license with a lower
+  one.** The message names the license that stays; `wyrm activate <file> --force`
+  replaces it anyway. An expired or revoked license blocks nothing. The installed
+  license is read from disk as well as memory, so a CLI process or a server that
+  missed another process's write still sees it.
+- **A bare `WRM-...` key is explained.** It failed with "Invalid license format:
+  expected JSON". It now says a key alone cannot be activated, and points at
+  `wyrm login` (signing in with the email the license was issued to) or the signed
+  download at https://account.ghosts.lk/app. The `wyrm license` hint and the
+  `wyrm_activate` redirect no longer suggest `wyrm activate <key>`.
+
+#### Changed
+- The paid renewal re-reads `license.json` before it asks the account, so a license
+  another process already renewed is adopted instead of minting another key, and
+  every process on the machine shares one renewal attempt per 24 hours. It replaces
+  the installed license with `force` only when both were issued to the same email;
+  a renewal that lowers the tier says so on stderr. A 401 now says the sign-in
+  expired and to run `wyrm login`, once, instead of waiting for the license to lapse.
+- The server's license pass moved from `index.ts` to `startLicenseChecks()` in
+  `license-refresh.ts`. The revocation list is still fetched only while a key is
+  installed.
+- `docs/EGRESS.md` and the README list the login, renewal and self-heal calls.
+
+#### Known, not fixed
+- The account token lasts 90 days from `wyrm login` and use does not extend it, so
+  after that both the renewal and the self-heal need a new `wyrm login`. Anyone who
+  signed in with an earlier version more than 90 days ago should run `wyrm login`
+  once. The account service sets that.
+- A hand-issued license comes back only if the account holds an active paid
+  entitlement for it. Otherwise the self-heal hears "no paid plan", and the signed
+  file has to be activated again from the dashboard.
+- ~~A perpetual grant comes back as a 90-day license.~~ **Fixed on the account
+  service and deployed 2026-09-23**, before this release: `/license/refresh` now
+  returns a stored perpetual license exactly as held instead of minting over it, so
+  the self-heal can no longer replace a hand-issued perpetual Team or Enterprise
+  grant with a 90-day key at the next server boot.
+- ~~`/license/refresh` applies its issuance limits before it checks for a paid
+  plan, so on a busy shared IP (an office NAT, an event network) a self-heal call
+  from a signed-in free install could pause that account's licence issuance
+  (`needs_review`) until an operator cleared it, leaving that user unable to run
+  `wyrm login` either.~~ **Fixed on the account service and deployed 2026-09-23**,
+  before this release: the entitlement lookup now runs first, so a free install
+  answers "no paid plan" without ever being counted as an issuance attempt, and an
+  operator control to clear the pause exists. That was the prerequisite this
+  release depended on, and it is why the unattended pass is safe to ship.
+- The license email still carries only the key; that template belongs to the
+  account service.
+
+### Windows
+
+Reported from Windows 11 (Node 24, npm 11.17, Claude Code) against 9.2.3: setup
+crashed, and every session hook failed to find the CLI, so nothing was captured or
+restored while the MCP server, the `wyrm` CLI and `wyrm doctor` all looked healthy.
+The rest came from an audit of the same code paths. Both reported bugs were
+reproduced on Linux before the fix and pass the same reproduction after it. None of
+this has been run on Windows yet: the platform is a parameter in the unit tests, and
+`scripts/smoke-platform.mjs` is the check to run there.
+
+#### Fixed
+- **`wyrm-setup` crashed with `ReferenceError: __dirname is not defined`.** The server
+  lookup tried `which` and a bare `npm`, neither of which can run on Windows, then
+  read `__dirname`, which an ES module does not have. It affected any host without
+  `which` and `npm` on PATH. Setup now finds `dist/index.js` next to itself, and on
+  Windows skips the two POSIX lookups. A test scans `src/` for the same mistake.
+- **Session hooks reported `wyrm CLI not found` on Windows.** All six hooks that call
+  the CLI (rehydrate, capture, prune, prompt-context, run-auto, tool-call-trace)
+  spawned a bare `wyrm`, which is a `.cmd` shim there, and Node will not start one
+  without a shell. The hooks now start the CLI's own `dist/wyrm.js` with their own
+  `node`: no shim, no shell, no PATH. On Windows they look in the install that
+  belongs to the running Node, then npm's default prefix; on every system the path
+  `wyrm setup` records in `~/.claude/hooks/wyrm-cli.json` is the last resort, which is
+  what finds a custom prefix. A record never outranks a live install, only a global
+  install may overwrite a record that still names a working CLI, and it must be an
+  absolute path on the host. A candidate that cannot start (not only a missing one)
+  no longer ends the search. run-auto and tool-call-trace failed silently, so run
+  attribution and tool-call traces were never recorded on Windows either. **Run
+  `wyrm setup` once after upgrading.**
+- **Hook and statusline commands are quoted.** Setup wrote `node <path>` bare. A space
+  in the user name split it, and a POSIX shell eats Windows backslashes. Windows
+  paths are now written with forward slashes inside double quotes; an ordinary POSIX
+  path is written exactly as before, so an upgrade rewrites nothing on Linux or
+  macOS. A legacy entry is rewritten in place, exactly one copy is left (two would
+  fire the hook twice), and removal recognises both forms. A
+  Windows path containing `$`, a backtick, `%` or `"` is refused with a message,
+  because no quoting makes those inert in bash, cmd and PowerShell alike.
+- **The rehydrate hook's machine-wide recency section** built its store path from
+  `$HOME` (unset on Windows) and shelled out to the `sqlite3` CLI (not shipped
+  there). It now uses `os.homedir()` and `node:sqlite`, with the CLI as the fallback.
+  Output is byte-identical on a store where both work.
+- **The statusline on Windows** is computed in-process. Its daemon listens on a
+  filesystem socket, which Node cannot do there, so every render fell back to a bare
+  brand line. A named pipe was tried and rejected in review: the pipe namespace is
+  machine-global and first-come, so another local user could claim the name and feed
+  the operator's terminal. On every system the socket client now rejects a reply
+  whose text is not a string and gives up after 1.5 s instead of hanging.
+- **`wyrm update`** spawned a bare `npm`. On Windows it now runs `node` on
+  `npm-cli.js`, never through a shell; if npm cannot be started the exact command is
+  printed, quoted for cmd and PowerShell, and a failed install explains that open
+  MCP clients hold the native module. **`wyrm_self_update` does not run on Windows**
+  for that reason (the server calling it is the process holding the file); it prints
+  the command.
+- **`wyrm ui`** started the server by spawning a bare `wyrm`; it now runs the sibling
+  `dist/wyrm.js` under its own `node`.
+- **Backup hygiene no longer fails `wyrm doctor` forever on Windows.** Files there
+  always report mode 0666 and `chmod` cannot change it, so every backup read as
+  "readable by others". The mode check is skipped on Windows, and doctor and
+  `wyrm backup legacy` say it was not checked (access there is governed by ACLs)
+  instead of reporting zero exposed items.
+- **Run-directly detection** in `http-fast`, `wyrm-guard` and `wyrm-memo` is one
+  helper that follows symlinks and compares case-insensitively on Windows.
+  `http-fast` previously did not follow a symlinked bin at all.
+- **`wyrm-setup` logs warnings and errors only**, like the `wyrm` CLI. Windows
+  PowerShell 5.1 renders stderr as red error blocks, so the informational migration
+  lines read as a failed setup.
+- `process.env.HOME` replaced with `os.homedir()` in `http-fast` and the setup wizard;
+  the live-embedding cwd match understands Windows separators and case.
+- **`npm run build` and `npm run clean` run on Windows.** They used `chmod +x` and
+  `rm -rf`.
+- **One Windows folder is one project.** A project was found by its exact path
+  string, and Windows paths are case-insensitive and take either slash, so `C:\Proj`,
+  `c:\proj` and `C:/Proj` would have become three projects, each holding part of that
+  folder's memory. Not seen in the report; found in the audit. On Windows only, a
+  lookup that misses the exact path now compares a key (backslashes as `/`, trailing
+  slash dropped, lower-cased) against the registered projects, and registering a
+  second spelling updates the existing project and keeps its stored path instead of
+  inserting another. The exact match always runs first, so the common case costs
+  nothing extra. The comparison is done in code, not with SQLite's `NOCASE`, which
+  folds ASCII only and would still split `C:\Users\José`. Covered: project lookup and
+  registration, the walk up from a subfolder (the failure firewall, session prime,
+  an omitted `projectPath`), the prompt-context hook, the statusline, the buddy
+  project hint and the bridge sources. Connector workspaces (`connector://Name`) are
+  not folders and stay case-sensitive. No migration, no stored path is rewritten, and
+  Linux and macOS run exactly the SQL they ran before.
+- **The install-script allow-list matches the packages that have install scripts.**
+  `wyrm update`, `wyrm_self_update`, the storage error hint and the docs passed
+  `--allow-scripts=wyrm-mcp,better-sqlite3`. `better-sqlite3` 13 ships its binding
+  prebuilt and has no install script; `onnxruntime-node` and `protobufjs` do, and
+  were being skipped. The list is now
+  `wyrm-mcp,better-sqlite3,onnxruntime-node,protobufjs`.
+
+#### CI
+- The cross-platform job ran `--help` on two binaries on Node 18 and 20, below the
+  supported floor of 22. It now builds on Node 22 and 24 across Linux, macOS and
+  Windows, runs `scripts/smoke-platform.mjs` (setup, hooks, the statusline endpoint
+  and the npm launch, for real, under a temp home) and the platform unit tests, and
+  no longer cancels the other systems when one fails.
+
+#### Docs
+- TROUBLESHOOTING has a Windows section with the 9.2.3 workarounds, and no longer
+  recommends the deprecated `windows-build-tools` package. GETTING_STARTED named
+  Node 18 as the minimum; it is 22.
+
+#### Known, not fixed
+- A Windows store that already holds one folder under two spellings keeps both
+  projects. Each is still found by its own exact path, and any other spelling goes to
+  the older of the two. Nothing merges them: that is a data migration, and it belongs
+  with the project-identity work.
+- Two lookups still compare the path string exactly on Windows: the `path` filter of
+  the HTTP project list (`src/http-projects.ts`), and the path half of the Live Memory
+  grove gate (`src/events.ts`), whose callers pass the numeric project id.
+
+### Wyrm Cloud recognises a machine it has seen before
+
+#### Changed
+- **`wyrm cloud login` tells Wyrm Cloud which machine it is.** Registration sent a
+  device name only, so the server added a device row on every login and one machine
+  could fill an account's device list. Login now also sends `machine_id`: a SHA-256 of
+  this machine's fingerprint under a prefix used for nothing else
+  (`sha256("wyrm-cloud-device:" + fingerprint)`, 64 hex chars). The raw fingerprint
+  stays on the machine, in `~/.wyrm/cloud.json`, where the copied-session check reads
+  it. The server gets a stable per-machine key and cannot turn it back into the
+  fingerprint. The id does not use `~/.wyrm/cloud.key`, which is the same on every
+  machine of an account and so cannot tell machines apart. If the fingerprint cannot
+  be computed, no id is sent and registration works as it did. A server that does not
+  know the field ignores it; one that does reuses the row it holds for this machine.
+  The device name, the login flow and its output are unchanged.
+
+#### Known, not fixed
+- The id follows the fingerprint, so a hostname change gives a new id and, as before,
+  a new device row. Two machines that share a hostname and a copied
+  `~/.wyrm/machine-id` share one id. On the clone, delete `~/.wyrm/machine-id`, then
+  run `wyrm cloud logout` and `wyrm cloud login`.
+
+
 ## [9.2.3] - 2026-09-14 - Wyrm keeps its memory honest over time
 
 The long-term audit of a store in daily use since June (quests #1150 to #1155)
