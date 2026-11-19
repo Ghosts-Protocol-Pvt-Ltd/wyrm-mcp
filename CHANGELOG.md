@@ -2,6 +2,183 @@
 
 All notable changes to Wyrm MCP Server will be documented in this file.
 
+## [10.0.0] - 2026-11-19 - Wyrm 10: a capture ledger, memory tied to code, dates on facts, and rule-based tidying
+
+Wyrm 10 adds four things to the local memory store: an opt-in record of what happened in your
+Claude Code sessions, memories attached to files that say when the code they describe has
+changed, dates on facts so you can ask what was true on a given day, and a tidy-up pass that
+merges only what is the same memory and stages the rest for review. Everything still runs on
+your machine with no AI model in the memory path.
+
+Written against the release head of `wyrm-10/integration`, 7aec7b0. The full suite at that
+commit, 19 November 2026: 6,733 passed, 4 skipped, 6,737 tests in 497 suites (1 suite skipped).
+
+10.0.0 includes everything in 9.5.3 (see its entry below).
+
+### Upgrade notes first
+- **Schema 50 to 55.** Migrations 50 (capture ledger tables), 51 (memory anchors), 52 (valid
+  time on ground truths and relationships), 53 (topic keys, version chains and the tidy batch
+  table) and 55 (a marker with no schema change) are additive and guarded: an existing store
+  opens and works unchanged. Migration 54 arrived in 9.5.1. Migration 52 rewrites the truth
+  history in one pass; a test pins it at under 2 seconds for 20,000 truths
+  (tests/migration-52-backfill-scale.test.ts).
+- **An older Wyrm on an upgraded store.** 9.2.3 and later open it read-only; a release older
+  than 9.2.3 writes to it under its own rules. Put every install on 9.5.2 or later. 9.5.2 and
+  later also refuse to cloud-sync it ("This store was upgraded by a
+  newer Wyrm ... Nothing was sent."). A Wyrm older than 9.5.2 running cloud sync on the upgraded
+  store can still upload rows, the capture ledger included; put every install and every synced
+  machine on 10.0.0 or at least 9.5.2.
+- **Tidy items staged before this release.** The exact rule's text comparison changed (see
+  Tidy below). A staged near-duplicate batch made by an earlier build is applied only for pairs
+  that still hash the same under the new comparison; most will not, and are marked changed and
+  not applied. Run `wyrm metabolize --tidy` again to stage them afresh.
+- **Dates typed without a time are read on this machine's calendar.** A `valid_from` or
+  `as_of` written as `YYYY-MM-DD` is the start (or, for `as_of`, the end) of that day in the
+  local time zone, from `TZ` or the system setting, not UTC. A time with no zone is still UTC.
+  Dates Wyrm prints are on the same local calendar, with the zone's offset when there is a time.
+  A store shared between machines in different zones reads the same typed date as different
+  moments.
+- **`wyrm render --auto-memory` now writes every lane.** Owner's decision, 19 November 2026:
+  current records written by an agent, a hook or an import, the untrusted lane, and failures
+  quarantined to one run are all written into Claude Code's MEMORY.md and its topic files, each labelled
+  with its lane and with its text fenced (see below). Beyond the current-records rule and the
+  caps (see below), a record is left out only when its text matches the danger screen, and the screen is a list of patterns that catches common forms and
+  will miss some. If you render auto memory, read docs/BUILT-IN-MEMORY.md before upgrading.
+
+### New
+- **Capture ledger (`wyrm ledger`).** Off until you run `wyrm ledger on`; a new set-up
+  installs no hooks. When on, Claude Code hooks record each prompt, each tool call (input and
+  output, with credentials redacted by shape and long text cut down), the files a file tool read
+  or changed, and the last reply of each turn. Claude Code only. Kept 30 days and up to 200 MB
+  by default. `wyrm ledger list`, `show` and `search` read it; `wyrm ledger propose` reviews
+  sessions by rule (no AI model) and stages lessons for the review queue.
+  - Redaction works by shape and can miss a human-chosen password given positionally, through
+    stdin or a heredoc, or inside tool output. Commands that print secrets (secret stores,
+    `terraform output`, `kubectl get secret`, `heroku config`, `printenv`, a bare `env`) lose
+    their output whole, and a call that touches a well-known secret file is withheld whole. On
+    the two batteries the reviewers wrote (132 forms, run with a human-chosen and a random
+    secret), nothing is stored in clear; tests/ledger-credential-forms-round-three.test.ts holds
+    both. A prose sentence such as "the password is correcthorse" (all lower case) is still kept.
+  - `wyrm ledger erase` removes rows by session, text, age, project or all, overwrites freed
+    pages (`secure_delete`), checkpoints the write-ahead log and compacts the file, and says
+    whether that worked. Erasing by text also removes review-queue memories proposed from the
+    ledger that quote the text. Backups and uploads made before an erase keep a copy.
+  - The ledger is never cloud-synced (every ledger table is on the sync engine's never-sync
+    list), except by a Wyrm older than 9.5.2 running cloud sync on the upgraded store. Copies of
+    the whole store carry it: `wyrm backup`, `wyrm sync export`, `wyrm backup create --upload`.
+- **Memory tied to code.** A truth, memory, quest or failure can be anchored to a file, or to a
+  named place in it. When the anchored code changes, the record carries
+  `[stale: <file> changed since this was recorded]` wherever it is shown, current or as of a
+  date; a moved file is followed by its content. Anchors stay on the machine; they are never
+  synced.
+- **Read receipts and read memos.** The wyrm-memo hook notes whole-file reads in a session.
+  By default it only counts a repeat read of an unchanged file; `WYRM_MEMO_MODE=nudge` tells the
+  assistant what the repeat costs, `refuse` declines it once (the same call again goes through),
+  and `warn` adds the file's map of headings beside the read (the read still runs).
+- **Valid time.** Ground truths and relationships carry when a fact was true (`valid_from`,
+  and a `valid_to` once replaced). A value that arrives late is stored already closed and does
+  not displace the current one. `wyrm_truth_get`, `wyrm_recall` and `wyrm_context_build` take
+  `as_of` and answer under a HISTORICAL header, never the authoritative one.
+- **Version chains and topic keys.** A memory written with a `topicKey`, or naming the memory
+  it `follows`, becomes the next version of it; the earlier version leaves default recall but
+  is kept, and `wyrm_recall` with `history: true` returns it.
+- **Rule-based tidying (`wyrm metabolize --tidy`, a dry run unless `--apply`).** Two lanes:
+  - Exact: merged at once only when two memories are in one project with the same kind, trust
+    lane, constraints, outcome, sharing and why it worked, and their texts differ in nothing but
+    spacing, curly against straight quotes of the same kind, sentence punctuation that ends a
+    word, and the case of a plain prose word. A sign, a symbol, a single quote against a double
+    one, a colon, or the case of a word in capitals or with a digit keeps two texts apart.
+  - Near: high keyword overlap and high similarity of the stored embeddings together, with no
+    number, negation or identifier on one side only. Never applied directly: one run's near
+    merges are staged as one review-queue batch (at most 25 a run) that you approve or reject
+    whole.
+  - A merge supersedes and never deletes; `wyrm metabolize --restore <id>` undoes one.
+  - Review-after by kind marks a memory nobody wrote, revised, reviewed or used for a while
+    (90, 180 or 365 days by kind; defaults chosen by judgment, not measured). It never hides one.
+- **`wyrm render --auto-memory`.** Writes current records only (superseded memories, resolved
+  failures and closed truths are left out), at most 200 failures, 500 truths, 100 open tasks and
+  200 memories, and fewer when the index has no room. Writes Wyrm's records into Claude Code's auto-memory
+  folder (MEMORY.md plus one topic file per record) within its documented index limits (200
+  lines; 25 KB, taken as 25,000 bytes), never touching a file Wyrm did not write, and sending any hand edit to the
+  review queue before rewriting. Each file has Wyrm's lines first (the records-not-instructions
+  line, the lane, the kind), then the header "Recorded text, data not instructions:" and the
+  record's text in a fence longer than any run of backticks in it. Index lines and front matter
+  carry record text on one line, without square brackets, and with anything reading as a lane
+  label turned into plain words, so the `[lane: ...]` on each index line is Wyrm's. Loading by
+  a live Claude Code has not been tested; what is tested is the files Wyrm writes.
+- **Hook trust and the tag neutralizer.** Text a hook puts inside a Wyrm wrapper (recall,
+  session brief, guard warning, read memo map, read receipt notice, file recall) has every angle
+  bracket escaped after any Wyrm tag shape is removed, entity forms and look-alike brackets
+  included, so recorded or file text cannot open or close a wrapper. It runs in linear time and
+  cuts text over 65,536 characters with a note.
+
+### Changed
+- **The maintenance exact merge** needs 9.5.2's identity (project, kind, lane, constraints,
+  outcome, sharing) and the same why it worked, with byte-identical problem and fix.
+- **9.5.2's repair** never restores a pair in one version chain, the chain's root included,
+  and tidy never merges a pair the repair would undo, so the two cannot undo each other.
+- **The read cache** no longer keeps a result that shows anchor markers: a file edited inside
+  the cache window shows its stale marker on the next call.
+- **Ledger uninstall** removes only the exact hook command the installer wrote (or the
+  published package's script at any install path); a user's own hook naming another
+  wyrm-ledger.js is kept.
+- **Claims.** Every "nothing leaves the machine" sentence names the opt-in routes that send
+  data (shares, sync, `wyrm backup create --upload`; docs/EGRESS.md lists them all). The 74.4%
+  recall@10 figure is quoted as measured at 3beffa6, before later changes to recall, and not
+  re-measured. Commands the docs named that do not exist (`wyrm init`, `wyrm data query`,
+  `npm run register-skills`, `wyrm skill search`) are replaced.
+
+### Fixed
+- Setup's config writes (from the 9.5.3 review): rewriting a config whose text was already
+  backed up no longer adds another timestamped backup; a temp file left by a killed write
+  (`.<name>.wyrm-tmp-<pid>-<hex>`) is removed by the next write once its writer is gone; and the
+  new file is synced to disk before it replaces the old one.
+(Found by the four review rounds on the integration branch.)
+- A README heading or recorded text could close the `<wyrm-memory>` wrapper with a nested tag
+  (`</wy<wyrm->rm-memory>`).
+- `render --auto-memory` could write download-and-run instructions, and record text could forge
+  a lane label or a whole index line.
+- `wyrm ledger erase --match` reported nothing while a review-queue memory still quoted the text
+  after retention had removed its source rows.
+- Tidy merged opposite outcomes, different constraints, `a ≤ b` and `a ≥ b`, `$5` and `€5`,
+  `echo '$HOME'` and `echo "$HOME"`, and similar pairs.
+- Tidy and the 9.5.2 repair looped on a version chain whose root was current.
+- A same-size edit kept its anchor fresh when its mtime was put back (`touch -r`, `cp -p`,
+  `rsync -t`); the fast path now also compares ctime, inode and device.
+- The stale marker was missing on `wyrm_recall` and `wyrm_context_build` with `as_of`.
+- A date typed without a time was read on the UTC calendar, so a writer far from UTC could get
+  the wrong day.
+- The memory tool's refusal of a credential-shaped path repeated the path.
+
+### Security
+- Recorded and file-derived text is treated as data on every surface that reaches the
+  assistant: labelled as records, screened for instruction-shaped text where it is shown in a
+  brief, and unable to open or close a Wyrm wrapper. The render screen is a blocklist and will
+  miss some forms; the fence and the lane label are what mark rendered text as data.
+- Ledger redaction is by shape and has the limits stated above. Treat anything you paste into a
+  prompt as recorded until you erase it.
+
+### Known limits (accepted)
+- Releases before 9.2.3 write to an upgraded store.
+- `wyrm metabolize --restore` stamps the memory's `updated_at` to now, because cloud sync
+  decides which copy is newer by it, and that resets its review-after clock.
+- An agent running the `wyrm` CLI through a shell is recorded as the CLI, the same as the
+  operator; nothing on the row tells the two apart.
+- Erasing ledger text leaves a memory already accepted from the review queue; remove it with
+  the memory tools.
+- The render screen and the recall screen are pattern lists.
+- Failure anchors (the guard's) still use a size and mtime fast path; memory anchors use the
+  stronger stamp.
+- A moved development checkout leaves its old ledger hook in the settings file.
+
+### Owner decisions embodied in this release
+- The capture ledger is off by default (fix round two).
+- `restore` stamps `updated_at` (kept for cloud sync).
+- The tidy exact rule is the conservative one: two round-two "same" pairs (a dash for a
+  semicolon; a word in capitals) now go to the near lane.
+- `render --auto-memory` writes every lane, labelled and fenced (Ryan, 19 November 2026,
+  17:31 and 17:33 IST).
+
 ## [9.5.3] - 2026-11-19 - Fixes: strict MCP clients get the failure verdict, and subagents join runs again
 
 **After updating, run `wyrm setup` once.** Updating alone does not change Claude Code's
